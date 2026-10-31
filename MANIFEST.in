@@ -1,0 +1,7 @@
+include uv.lock
+include AGENTS.md
+recursive-include docs *.md
+recursive-include examples *.json *.txt
+recursive-include mod *.mod *.template *.txt *.yml *.md
+global-exclude *.py[cod]
+global-exclude __pycache__

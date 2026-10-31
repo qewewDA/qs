@@ -1,0 +1,5 @@
+# No automatic activation on game start. The player explicitly enables the bridge.
+# Script interfaces require validation against the user's installed Stellaris build.
+on_monthly_pulse_country = {
+    events = { saa.10 }
+}

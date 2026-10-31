@@ -1,0 +1,42 @@
+{
+  "save_path": "empire.txt",
+  "state_dir": "../.autopilot",
+  "country_id": "0",
+  "campaign_id": "",
+  "verified_game_version": "",
+  "single_player_confirmed": false,
+  "non_ironman_confirmed": false,
+  "resolution": [2560, 1440],
+  "console_key": "`",
+  "max_save_age_seconds": 180,
+  "verification_timeout_seconds": 60,
+  "poll_seconds": 2,
+  "save_steps": [],
+  "allowed_actions": [],
+  "actions": [
+    {
+      "id": "choose_physics",
+      "description": "Select a specific physics technology with a locally calibrated UI macro. Replace these example clicks and technology ID before authorizing.",
+      "category": "research",
+      "steps": [
+        {"kind": "key", "key": "f4"},
+        {"kind": "wait", "seconds": 0.5},
+        {"kind": "click", "x": 0.45, "y": 0.35},
+        {"kind": "key", "key": "escape"}
+      ],
+      "preconditions": [{"path": "resources.alloys", "op": "gte", "value": 100}],
+      "expected": [{"path": "research.physics", "op": "eq", "value": "REPLACE_WITH_TECH_ID"}]
+    },
+    {
+      "id": "defend_capital",
+      "description": "Dispatch non-combat mobile military fleets to the capital via saa.20. Clears their orders. Replace fleet/system IDs before authorizing; a single witness does not confirm all fleets arrived.",
+      "category": "defense",
+      "event": "saa.20",
+      "preconditions": [
+        {"path": "metadata.war_status_known", "op": "eq", "value": true},
+        {"path": "at_war", "op": "eq", "value": true}
+      ],
+      "expected": [{"path": "fleets_by_id.42.system_id", "op": "eq", "value": "0"}]
+    }
+  ]
+}

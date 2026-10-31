@@ -1,0 +1,100 @@
+namespace = saa
+
+# Probe only: no resource grants, modifiers, free construction or AI takeover.
+# Manually issue: event saa.1 <player_country_id>
+# Trigger conditions are repeated inside immediate: console invocation must not
+# rely on trigger evaluation to protect against the wrong country/game mode.
+country_event = {
+    id = saa.1
+    hide_window = yes
+    is_triggered_only = yes
+    trigger = { is_ai = no is_multiplayer = no is_ironman = no }
+    immediate = {
+        if = {
+            limit = { is_ai = no is_multiplayer = no is_ironman = no }
+            set_country_flag = saa_bridge_enabled
+            log = "SAA|bridge_enabled"
+            saa_log_observation = yes
+        }
+    }
+}
+
+# Manually issue: event saa.2 <player_country_id>
+country_event = {
+    id = saa.2
+    hide_window = yes
+    is_triggered_only = yes
+    trigger = { is_ai = no is_multiplayer = no is_ironman = no }
+    immediate = {
+        if = {
+            limit = { is_ai = no is_multiplayer = no is_ironman = no }
+            remove_country_flag = saa_bridge_enabled
+            log = "SAA|bridge_disabled"
+        }
+    }
+}
+
+country_event = {
+    id = saa.10
+    hide_window = yes
+    is_triggered_only = yes
+    trigger = {
+        is_ai = no
+        is_multiplayer = no
+        is_ironman = no
+        has_country_flag = saa_bridge_enabled
+    }
+    immediate = {
+        if = {
+            limit = {
+                is_ai = no
+                is_multiplayer = no
+                is_ironman = no
+                has_country_flag = saa_bridge_enabled
+            }
+            saa_log_observation = yes
+        }
+    }
+}
+
+# Explicitly authorized defensive muster. This clears the existing orders of
+# every mobile military fleet not currently in combat and queues a move to the
+# capital. It does not choose fronts, guarantee a safe route, or confirm arrival.
+# Syntax cross-checked against CWTools; not tested in a running Stellaris client.
+# Manually issue only after granting this action: event saa.20 <player_country_id>
+country_event = {
+    id = saa.20
+    hide_window = yes
+    is_triggered_only = yes
+    trigger = {
+        is_ai = no
+        is_multiplayer = no
+        is_ironman = no
+        has_country_flag = saa_bridge_enabled
+    }
+    immediate = {
+        if = {
+            limit = {
+                is_ai = no
+                is_multiplayer = no
+                is_ironman = no
+                has_country_flag = saa_bridge_enabled
+                exists = capital_scope
+            }
+            capital_scope = { save_event_target_as = saa_defense_capital }
+            every_owned_fleet = {
+                limit = {
+                    is_mobile = yes
+                    is_ship_class = shipclass_military
+                    is_in_combat = no
+                }
+                clear_orders = yes
+                queue_actions = { move_to = event_target:saa_defense_capital }
+            }
+            log = "saa_DEFEND_DISPATCHED|country=[This.GetName]"
+        }
+        else = {
+            log = "saa_DEFEND_REJECTED|country=[This.GetName]"
+        }
+    }
+}

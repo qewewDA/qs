@@ -1,0 +1,5 @@
+# Telemetry is observational; these messages do not acknowledge gameplay actions.
+# The static enable/disable messages are not request-correlated acknowledgements.
+saa_log_observation = {
+    log = "SAA|observation|date=[GetDate]|empire=[This.GetName]"
+}

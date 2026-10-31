@@ -1,0 +1,64 @@
+name: Development checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python ${{ matrix.python }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.12", "3.13"]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - name: Install locked development and optional integrations
+        run: uv sync --frozen --extra dev --extra mcp --extra windows
+      - name: Unit and integration tests
+        run: uv run --frozen pytest -q
+      - name: Lint
+        run: uv run --frozen ruff check src tests
+      - name: Build source and wheel distributions
+        run: uv build
+      - name: Check bundled Mod resources
+        run: |
+          uv run --frozen python - <<'PY'
+          from pathlib import Path
+          import tarfile
+          from zipfile import ZipFile
+          wheel, = Path("dist").glob("*.whl")
+          with ZipFile(wheel) as archive:
+              files = set(archive.namelist())
+          required = (
+              "/share/stellaris-ai-autopilot/mod/descriptor.mod",
+              "/share/stellaris-ai-autopilot/mod/events/saa_events.txt",
+              "/share/stellaris-ai-autopilot/mod/common/on_actions/saa_on_actions.txt",
+              "/share/stellaris-ai-autopilot/mod/common/scripted_effects/saa_effects.txt",
+              "/share/stellaris-ai-autopilot/mod/localisation/english/saa_l_english.yml",
+              "/share/stellaris-ai-autopilot/mod/localisation/simp_chinese/saa_l_simp_chinese.yml",
+          )
+          for suffix in required:
+              assert any(name.endswith(suffix) for name in files), suffix
+          source, = Path("dist").glob("*.tar.gz")
+          with tarfile.open(source) as archive:
+              names = archive.getnames()
+          for suffix in ("/docs/HANDOFF.md", "/AGENTS.md", "/uv.lock", "/examples/config.json"):
+              assert any(name.endswith(suffix) for name in names), suffix
+          PY
+      - name: Run installed wheel without a checkout import
+        run: uv run --isolated --no-project --with "$(ls dist/*.whl)" stellaris-autopilot demo
+      - name: Install bundled Mod from the isolated wheel
+        run: uv run --isolated --no-project --with "$(ls dist/*.whl)" stellaris-autopilot install-mod --mod-dir "$RUNNER_TEMP/saa-wheel-mod"

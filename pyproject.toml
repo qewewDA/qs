@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stellaris-ai-autopilot"
+version = "0.1.0"
+description = "Observable single-player Stellaris automation with a Windows execution bridge"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = []
+
+[project.optional-dependencies]
+windows = ["PyAutoGUI==0.9.54; sys_platform == 'win32'"]
+dev = ["pytest==8.4.2", "ruff==0.14.3"]
+mcp = ["mcp>=1.20,<2"]
+
+[project.scripts]
+stellaris-autopilot = "stellaris_autopilot.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.data-files]
+"share/stellaris-ai-autopilot/mod" = ["mod/stellaris_ai_autopilot/descriptor.mod"]
+"share/stellaris-ai-autopilot/mod/events" = ["mod/stellaris_ai_autopilot/events/*.txt"]
+"share/stellaris-ai-autopilot/mod/common/on_actions" = ["mod/stellaris_ai_autopilot/common/on_actions/*.txt"]
+"share/stellaris-ai-autopilot/mod/common/scripted_effects" = ["mod/stellaris_ai_autopilot/common/scripted_effects/*.txt"]
+"share/stellaris-ai-autopilot/mod/localisation/english" = ["mod/stellaris_ai_autopilot/localisation/english/*.yml"]
+"share/stellaris-ai-autopilot/mod/localisation/simp_chinese" = ["mod/stellaris_ai_autopilot/localisation/simp_chinese/*.yml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"

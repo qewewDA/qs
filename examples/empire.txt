@@ -1,0 +1,18 @@
+# Synthetic save fixture for offline inspection only. Not a playable game save.
+version="DEMO-ONLY"
+date="2200.01.01"
+ironman=no
+multiplayer=no
+galaxy={ name="saa-demo-campaign" }
+player={ name="Player" country=0 }
+country={
+  0={
+    name="Research Commonwealth"
+    at_war=no
+    modules={ standard_economy_module={ resources={ energy=500 minerals=700 alloys=300 } } }
+    budget={ last_month={ income={stations={alloys=35 energy=60}} expenses={ships={alloys=10 energy=20}} } }
+    tech_status={ physics_queue={ {technology="tech_basic_science_lab_1"} } }
+  }
+}
+fleet={ 42={ owner=0 name="Home Fleet" coordinate={origin=7} current_order={type=idle} } }
+planets={ planet={ 1={owner=0 name="Homeworld" buildings={building_capital}} } }

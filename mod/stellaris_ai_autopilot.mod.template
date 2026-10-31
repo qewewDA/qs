@@ -1,0 +1,4 @@
+name="Stellaris AI Autopilot Bridge"
+version="0.1.0"
+tags={ "Utilities" }
+path="@MOD_PATH@"
