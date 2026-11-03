@@ -11,3 +11,5 @@ dist/
 *.sqlite*
 config*.local.json
 .env
+/artifacts/
+/campaign/

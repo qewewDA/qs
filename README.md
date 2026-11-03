@@ -1,24 +1,34 @@
 # Stellaris AI Autopilot · 群星 AI 自动驾驶
 
-让 LLM 从玩家帝国的存档中制定计划，通过 **Windows 游戏输入或固定 Mod 事件**执行获准操作，再读取新存档验证结果。Python 3.11+，Windows 10/11 为实机目标；MIT 开源。核心无第三方运行依赖，LLM 支持 OpenAI-compatible / Ollama，另有可选 MCP 接口。
+用 MCP 精确指挥单人《群星》：模型只能从新观察到的状态里选择具体星球、舰队、科技和已授权动作，不能提交控制台脚本、坐标、原生地址或文件路径。日常入口是持久战役启动器 `scripts/serve_campaign.py`：每次连接都从最近一次不可变检查点继续，不会重新从最初存档开始。
 
-接手开发请先读 [交接文档](docs/HANDOFF.md)；完整测试与安装验证范围见 [验证记录](docs/validation.md)。
+Python 3.11+，Windows 10/11 为实机目标；MIT 开源。本文描述的持久战役 MCP 入口不发送键盘或鼠标输入；旧的 Windows 输入路径另述。仓库只包含源码、Mod 模板和测试，不附带游戏本体、知识 JSON、真实存档或本机 MCP 配置。
 
-**这是可安装、可运行、带测试的首版，不是已完成全部游戏操作的通用帝国 AI。** 云环境没有《群星》，Windows 输入与 PDXScript 尚未实机验证。经济、科研操作需要按本机版本/分辨率配置 UI 宏；舰队集结有游戏脚本，但仍需本机验证。未实现自动探索 UI、全自动外交、智能战线和任意建筑/舰船的通用队列接口。不会用免费资源、刷建筑或改 AI 权重冒充玩家操作。
+## 当前能力与边界
 
-## 安装与离线运行
+**已验证构建：`Cygnus v4.5.2 (9776)`。** 原生适配器固定校验 `stellaris.exe` 的 SHA-256（`400df27c82ddc845aa9dce79bd468d81f18f060d299cd263e3afa93aef4f7a83`），Frida 固定为 `17.9.4`；构建或哈希不符时拒绝原生控制。当前原生后端只支持玩家国家 `0`、单人、非铁人。这是固定版本、固定样本的实机结果，不能外推为全部 DLC、全部起源/特殊建筑/舰种或未来版本均已支持。
 
-Windows PowerShell，在仓库根目录执行：
+已经实机通过的范围包括：
+
+- 暂停/恢复、暂停状态下观察，以及指定科研领域的精确科技选择；
+- 指定舰队的等待、环绕，以及跨系统移动/停止的订单入列；
+- 城市区划、指定分区建筑的正常付费入队，以及升级、拆除、转区和取消；
+- 普通与殖民船建造入队、指定天体勘察、采矿/科研/前哨站订单、普通殖民命令与殖民 landing。
+
+必须区分三种证据：**入队/下单成功**（新状态出现正确项目或订单）、**自然完成**（游戏推进到项目或舰队动作实际结束）、**landing/殖民发展**（殖民船真正落地、殖民地开始发展）。本仓库不会用前一种证据代替后一种：`queue_colony_ship` 只证明殖民船建造入队，`colonize_planet` 与 landing 另行验证，完整殖民发展仍未验证；造舰、勘察、建站和移动的多数结果只到精确入队/订单。内阁、传统和飞升选择保留给用户决定；战斗、外交和全部建设变更没有完整接口。
+
+完整接口与逐项证据边界见 [MCP 逐项指挥](docs/direct-control.md)，持久战役的目录、保存与恢复见 [战役接续](docs/campaign.md)。旧的 Windows 键鼠输入和只读 MCP 仍在仓库中，但不是本入口的控制方式，说明见下文及 [无键鼠直连](docs/direct-connection.md)。
+
+## 安装
+
+在仓库根目录，Windows PowerShell：
 
 ```powershell
-py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[windows,mcp,dev]"
-.\.venv\Scripts\stellaris-autopilot.exe demo
-.\.venv\Scripts\stellaris-autopilot.exe inspect examples\empire.txt
-.\.venv\Scripts\python.exe -m pytest -q
+uv sync --frozen --extra dev --extra mcp --extra native
+uv run python scripts/serve_campaign.py --help
 ```
 
-Linux/macOS 可运行观察、规划、MCP、模拟及测试；真实输入只支持 Windows：
+`native` 额外依赖安装 Frida（仅 Windows 生效）；`mcp` 提供 MCP 服务端。没有原生依赖时可以运行离线解析、模拟和只读 MCP，但不能建立原生控制。Linux/macOS 可运行观察、规划、模拟和测试，真实游戏控制只支持 Windows：
 
 ```bash
 uv sync --frozen --extra dev --extra mcp
@@ -26,85 +36,114 @@ uv run stellaris-autopilot demo
 uv run pytest -q
 ```
 
-`demo` 使用独立临时目录和 **replay adapter**，实际运行解析 → 授权 → 派单 → 新观察 → 后置条件 → SQLite 记录，输出 `SIMULATION` 和 `verified`。它不连接游戏，也不调用付费模型。
+`demo` 使用独立临时目录和 replay adapter，执行解析 → 授权 → 派单 → 新观察 → 后置条件 → SQLite 记录，输出 `SIMULATION` 和 `verified`。它不连接游戏，也不调用付费模型，不能当作实机验证。
 
-## 连接自己的单人帝国
+## 快速开始：持久战役 MCP
 
-本轮目标：**当前最新稳定版、中文、2560×1440**。不固定 4.5.2，也不把参考仓库的版本号当作当前发行版。运行时从实际存档读取完整版本，并由本机完成兼容验证后锁定；云端尚未核实官方最新版本号。UI Mod 名称及缩放比例尚未确定，点击坐标保留占位。启用 UI Mod 时另存 `config.ui-mod.local.json` 并重新校准；原版用 `config.local.json`，不要混用两套宏。填版本号及匹配分辨率只能通过运行前检查，不能证明 UI 布局或 Mod 兼容；需要本机测试后再授权。
+启动器自己创建并持有游戏进程；启动前必须没有其他 `stellaris.exe` 在运行，并先在 Steam 客户端登录。它不会接管或关闭手动打开的游戏。默认安装目录可用 `--game-dir` 覆盖。
 
-1. 使用**单人、非铁人**游戏，保留自己的存档备份。存档通常在“文档/Paradox Interactive/Stellaris/save games/”，也可能在 OneDrive。先手动保存，运行 `inspect <实际.sav路径>`，确认 `country_id`、版本、科技、库存、舰队与月净收入。不支持的字段会留空并标记，不会补成 0。
-2. 复制 `examples/config.json` 为根目录的 `config.local.json`。路径相对于配置文件；修改 `save_path` 为实际存档、`country_id` 为自己的国家 ID、`campaign_id` 为该存档的 `metadata.campaign_id`、`state_dir` 为 `./.autopilot`（示例位于子目录，复制到根目录后需调整）。缺少可识别战役身份的存档只能观察，不能实时执行。`verified_game_version` 填入**本机核对过的完整** `metadata.game_version`，不是随意填写最新版。铁人或多人标志为 yes 时永远拒绝操作；仅在存档没有相应字段且你已核实模式时才将两个 `*_confirmed` 设为 true。
-3. 配置 UI 操作。`calibrate --delay 5` 后切回游戏，把鼠标停在目标控件；输出客户区尺寸及 0–1 相对坐标。将 `resolution`、宏步骤、前置条件和**具体**后置条件改为本机值。示例坐标、科技 ID、舰队 ID 和首都星系 ID **都是占位，不可直接授权**。每种宏先从已知 UI 状态手动核对；不自动判断面板/弹窗、语言或 UI 缩放。
-4. 将愿意交给 AI 的动作 ID 加入 `allowed_actions`。模型只能选这些 ID，不能提供坐标、控制台代码或权限。经济动作可用预先校准的付费建设宏，后置条件应检查对应星球的新队列/建筑；科研应检查具体科技 ID，不能用“合金随时间增加”代替动作验证。
-5. 先运行 dry-run，再 `doctor`，最后显式使用 `--live`。不加 `--live` 从不发送游戏输入。
+首次导入一个**单人、非铁人**存档（原档只读，导入后保留副本）：
 
 ```powershell
-$saa = ".\.venv\Scripts\stellaris-autopilot.exe"
-& $saa calibrate --delay 5
-& $saa doctor --config config.local.json
-& $saa run --config config.local.json --planner rules --goal "科技优先，保持合金盈余"
+uv run python scripts/serve_campaign.py `
+  --campaign-dir .\campaign `
+  --initialize "<你的存档>.sav" --country 0 --single-player --non-ironman `
+  --game-dir "<Steam>\steamapps\common\Stellaris"
 ```
 
-### 使用 LLM 长期管理
-
-本地 Ollama 示例：自行安装 Ollama，运行支持 tools 的模型（例如 `ollama pull qwen3:8b`）。模型是否已安装、是否支持强制工具调用由实际响应决定；项目不会自动下载模型。
+首次成功后去掉 `--initialize`，之后每次连接同一个 `--campaign-dir`：
 
 ```powershell
-$env:AUTOPILOT_LLM_BASE_URL = "http://localhost:11434/v1"
-$env:AUTOPILOT_LLM_MODEL = "qwen3:8b"
-# 使用远程模型时改为提供商的 HTTPS /v1 地址，按需在本机安全设置 API key：
-# $env:AUTOPILOT_LLM_API_KEY = ...
-& $saa run --config config.local.json --planner llm --live --continuous --years 10 --goal "未来十年重点发展科技，保持合金盈余，尽量避免战争。遭到进攻时自动调集舰队防守。"
+uv run python scripts/serve_campaign.py `
+  --campaign-dir .\campaign `
+  --game-dir "<Steam>\steamapps\common\Stellaris"
 ```
 
-打开 Stellaris 后运行命令，默认有 5 秒切回游戏（可用 `--arm-delay` 调整）；每步输入都检查前台进程是否为 `stellaris.exe`。不会替你激活游戏窗口。`--continuous` 在新存档出现时重新规划，起始游戏日期加 `--years` 为结束点；暂停游戏不会推进期限。`rules` 是离线优先级规则，**不理解自然语言**，只有 `llm` 使用上述目标和四领域策略。远程 LLM 会收到规范化的玩家状态与目标，不上传原始存档、API key 或本地路径。
-
-动作完成后需要**新存档**。可在 `save_steps` 配置本机已核对的快速保存宏，或依靠频繁自动保存/手动保存。确保观察路径是同一局最新存档；本版不自动挑选未知目录中的“最新一局”。默认 60 秒验证超时，可调至 600 秒；长距离舰队到达可能超过该时间，建议以本机实际可观察的移动订单作后置条件。日志 ACK、文件存在和发送按键成功都不算验证。`verified` 只表示配置的后置条件在新存档中成立，因果强度取决于你配置的条件。
-
-### 可选的游戏内 Mod
-
-```powershell
-& $saa install-mod --mod-dir "$env:USERPROFILE\Documents\Paradox Interactive\Stellaris\mod"
-```
-
-将 Mod 加入 Paradox Launcher 的播放集。按实际文档位置修改路径；安装命令不会覆盖已有 Mod。先在游戏控制台手动执行 `event saa.1 <玩家国家ID>`，检查 `logs/game.log` 的 `SAA|bridge_enabled` 和 `logs/error.log`。月脉冲输出玩家观察日志；Python 日志监听器支持半行、截断和轮转。配置 `log_path` 为实际 `game.log` 可启用监听。
-
-`defend_capital` 是固定事件 `saa.20`：清除所有未交战的自有移动军事舰队旧命令，排入移向首都的命令，不改资源或属性。它没有智能前线选择，也不保证安全路径。设置守卫和具体舰队/订单后置条件后才授权。`saa.2` 停用桥接；只停桥接不会撤销已下达的舰队命令。详见 [Mod 使用说明](mod/README.md)。
-
-## 停止、恢复和结果
-
-```powershell
-& $saa stop --config config.local.json
-& $saa journal --config config.local.json
-# 在游戏内核实未验证操作后记录结论，而不是盲目重发：
-& $saa reconcile --config config.local.json --id 1 --note "已核实游戏状态及队列，无需重复发送"
-```
-
-`stop` 创建 `state_dir/STOP`；恢复前由你删除该文件。宏等待期间约每 50ms 检查 STOP 和失焦，单次系统输入调用不能撤销。Ctrl+C 结束进程，PyAutoGUI 鼠标移至屏幕角落可紧急停止输入。事件输入中断后可能留下控制台和部分文字，必须人工核对。驱动绑定首次检查的游戏 PID，游戏重启后须重启自动驾驶。SQLite 在发送前持久登记，超时/异常/中断保留 `pending` 或 `unverified`，阻止重复派单，直到人工核对。不要同时运行多个使用不同 state_dir 的控制器。游戏焦点、菜单、当前存档发生变化时应停止；前台检查不能完全消除系统切换焦点的瞬间竞态。
-
-状态区分：`dry_run` 未输入、`waiting` 无操作、`blocked` 拒绝、`dispatched` 仅已发送、`verified` 新存档满足条件、`unverified` 未确认。决策在 `decisions.jsonl`，操作在 `journal.sqlite`。本版只自动处理新观察后的重新规划；不对不明结果自动重试，也不会绕过失败的前置条件。
-
-## MCP 与结构
+MCP 客户端配置示例（路径替换为本机实际值；`cwd` 指向仓库根目录）：
 
 ```json
-{"mcpServers":{"stellaris":{"command":"C:/path/qs/.venv/Scripts/stellaris-autopilot.exe","args":["mcp","--config","C:/path/qs/config.local.json"]}}}
+{
+  "mcpServers": {
+    "stellaris-campaign": {
+      "command": "<repo>\\.venv\\Scripts\\python.exe",
+      "args": [
+        "<repo>\\scripts\\serve_campaign.py",
+        "--campaign-dir", "<campaign-dir>",
+        "--game-dir", "<Steam>\\steamapps\\common\\Stellaris"
+      ],
+      "cwd": "<repo>"
+    }
+  }
+}
 ```
 
-MCP 暴露 `observe_empire`、`list_actions`、`plan_action` 和 `status`，全部只读；`plan_action` 是预览。真正执行由本机 CLI 管理，MCP 请求不能升级为 live。
+`--status` 只读检查 manifest、检查点和历史命令，不启动游戏。`--recover-last-checkpoint` 只在明确接受“从最近完成检查点恢复、丢弃上次未保存进度”时使用；存在未决命令时仍然拒绝。
 
-MCP 查询稳定的数据库/WAL 私有副本，不在原状态目录创建 SQLite sidecar。主库与 WAL 总计上限 64MiB；三次快照均被并发写入改变时拒绝预览，不把未读到的未决动作视为空。归档数据库前先停止控制器并保留未决操作，勿在运行中单独删除 WAL。`doctor` 的 policy 检查失败和 `run` 的 blocked/unverified 返回退出码 2，便于脚本识别失败。
+### 日常 MCP 顺序
+
+1. `campaign_status()` 查看当前检查点、存档日期、会话历史和未决命令。
+2. `request_observation()` 读取本次会话的新状态。第一个成功的新观察会确认确实载入了当前检查点；身份、日期或玩法状态不符时拒绝后续写入。
+3. 用精确工具操作具体对象；每项都核对新状态中的真实后置条件，不把日志 ACK 当作成功。
+4. 中途 `checkpoint_campaign()` 保存新检查点并继续保持暂停。
+5. 结束前显式调用 `save_and_close()`，确认返回 `saved_and_closed` 且 `owned_process_closed:true`，再断开 MCP。
+6. 下次连接同一目录，加载 manifest 指向的最新检查点。
+
+断开 MCP 时的自动保存只是尽力而为；客户端可能在数秒内强杀服务，不能保证断开本身完成保存。保存失败会保留正在运行的游戏并记录 `save_failed`，由用户通过游戏自身界面人工挽救；程序不会自动重试或猜测进程。
+
+### `--reload-proof` 与生产退出
+
+`--reload-proof` 是可选参数，但生产退出需要它：报告必须是针对**当前游戏构建、当前战役**的真实两轮重载实验，包含 EXE hash、版本、国家、两轮保存/关闭/重载状态 hash 和清理结果。没有报告时仍可创建并保留解析检查点，但 `save_and_close()` 会拒绝关闭游戏（游戏保持暂停）。仓库不附带该报告或生成它的研究实验脚本；干净 clone 首次使用通常只能保存检查点后人工退出，或自行按相同口径完成两轮重载实验。指定无效报告会在创建会话和启动游戏之前直接拒绝。
+
+### 可选知识库
+
+`--knowledge-bundle` 指向本地 `GameKnowledge` JSON（默认尝试仓库相对路径 `artifacts/qs-game-knowledge.json`，不存在则不启用知识工具）。知识库包含本机游戏定义与本地化编译结果，体积较大，**不随仓库分发**；请放在 git 忽略的位置或 `artifacts/` 下且不要提交。资料只用于检索建筑、区划、科技、飞升、传统、内阁、舰船、经济、外交和危机等定义，不会授予任何游戏操作权限。官方 Wiki 与灰机 Wiki 正文当前未导入（0 条），不能宣称已抓取网站全部正文。
+
+## 精确控制接口
+
+默认授权（不加 `--extended`）只有原有实机证据的四个原生操作，以及两种固定舰队订单：
+
+- `select_research`、`queue_district`、`queue_building`、`set_paused`；
+- `issue_order` 的 `fleet_wait` 与 `fleet_orbit`。
+
+加 `--extended` 后额外开放升级、拆除、转区、取消建设、普通/殖民造舰、勘察、建站、殖民、跨系统移动和停止订单。接口存在不等于全部实机通过；逐项范围见 [MCP 逐项指挥](docs/direct-control.md)。所有工具都执行本地授权、所有权、可观察性、暂停和真实后置条件检查；模型不能选择进程、DLL、函数地址、路径、原始脚本或执行代码。
+
+原只读 MCP 入口仍可用，只暴露 `observe_empire`、`list_actions`、`plan_action` 和 `status`，全部只读：
+
+```json
+{"mcpServers":{"stellaris":{"command":"<repo>\\.venv\\Scripts\\stellaris-autopilot.exe","args":["mcp","--config","<repo>\\config.local.json"]}}}
+```
+
+旧的 Windows 输入路径（`calibrate`/`run --live`）使用 `PyAutoGUI` 和本机宏坐标，需要单独安装 `windows` 额外依赖并按本机分辨率校准；示例坐标一律是占位。它和精确 MCP 是两套入口，不能把一套的验证结果套到另一套。
+
+## 其他常用命令
+
+```powershell
+uv run stellaris-autopilot inspect "<你的存档>.sav"
+uv run stellaris-autopilot install-mod --mod-dir "$env:USERPROFILE\Documents\Paradox Interactive\Stellaris\mod"
+uv run pytest -q
+uv run --all-extras ruff check src tests scripts
+```
+
+Mod 安装命令不会覆盖已有 Mod；安装后需在 Paradox Launcher 播放集中启用。动作完成需要新存档；日志 ACK、文件存在和发送按键成功都不算验证。状态区分 `dry_run`、`waiting`、`blocked`、`dispatched`、`verified`、`unverified`，未决操作保留到人工核对，不自动重发。
+
+## 目录结构
 
 ```text
+scripts/serve_campaign.py   持久战役 MCP 启动器（日常生产入口）
 src/stellaris_autopilot/
-  pdx.py / saves.py       文本/ZIP 解析、玩家视角与版本差异
-  observe.py             稳定快照、日志增量监听
-  planner.py             离线规则 / OpenAI-compatible 工具调用
-  config.py / predicates.py  本机授权和可观察断言
-  engine.py / journal.py  执行闭环、持久去重与故障恢复
-  windows.py             Windows 前台/DPI/输入桥接
-  mcp_server.py / cli.py  MCP 与命令行
-mod/                     PDXScript on_actions/events/scripted_effects
-tests/                   解析、故障注入、模拟输入、HTTP/MCP/CLI测试
+  direct.py / direct_mcp.py     精确 MCP 工具与本地授权
+  campaign.py / campaign_runtime.py  不可变检查点、会话、保存与重载门禁
+  native.py / native_*.js       固定构建的原生科研、建设、舰队命令适配
+  pdx.py / saves.py             文本/ZIP 存档解析与玩家视角
+  observe.py / planner.py       快照、规则/LLM 规划
+  config.py / engine.py / journal.py  授权、执行闭环与持久日志
+  windows.py / mcp_server.py / cli.py  Windows 输入、只读 MCP、命令行
+mod/                          PDXScript 模板
+tests/                        解析、故障注入、模拟输入、MCP/CLI 测试
 ```
 
-研究结论、许可证与精确提交在 [docs/research.md](docs/research.md)。四个参考项目均已审阅 README、结构及相关源码；本项目独立实现，无复制其代码。三个 Wiki 域名因云网络策略 403 尚未读到正文，不能宣称完成全部文档研究；需要在环境设置保存已添加的域名后继续核对。CWTools 类型定义提供了脚本交叉核查依据，不能替代实机测试。不宣称兼容尚未测试的游戏版本。
+## 验证与限制
+
+2026-11-02 的 Windows 实机验收构建为 `Cygnus v4.5.2 (9776)`；完整回归为 **1628 passed, 3 skipped**，`ruff check src tests`、`git diff --check`、wheel/sdist 构建与包内文件核对通过。实机证据来自隔离测试副本：`keyboard_mouse_input=false`、`native_ai_takeover=false`，不是对用户持久战役的操作。验收报告和证据记录不随源码分发（测试源码随 sdist 提供）；详见 [验证记录](docs/validation.md)。
+
+当前明确未覆盖：全部 DLC/起源/特殊建筑与舰种、完整殖民发展、完整战斗与外交、任意版本二进制存档格式、客户端强杀/断电下的保存保证、远端 CI。固定版本或 EXE 哈希不匹配时，原生控制会被拒绝，只保留观察/规划等离线能力。研究结论、许可证与参考项目审查见 [docs/research.md](docs/research.md)。

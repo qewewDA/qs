@@ -71,8 +71,13 @@ class Engine:
             return {"status": "blocked", "reason": "Action is not locally authorized"}
         if self.journal.unresolved():
             return {"status": "blocked", "reason": "Unresolved dispatch; inspect and reconcile the journal"}
-        missing = [p["path"] for p in action.preconditions + action.expected
+        missing = [p["path"] for p in action.preconditions
                    if lookup(observation.state, p["path"]) is MISSING]
+        # Only locally opted-in exact postconditions may first appear after input.
+        # Preconditions and change predicates still require an observed baseline.
+        missing.extend(p["path"] for p in action.expected
+                       if lookup(observation.state, p["path"]) is MISSING
+                       and not (p["op"] == "eq" and p["path"] in action.allow_new_expected_paths))
         if missing:
             return {"status": "blocked", "reason": f"Unobservable predicate paths: {missing}"}
         if not all(evaluate(p, observation.state) for p in action.preconditions):

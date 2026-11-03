@@ -1,8 +1,140 @@
+import ctypes
 import sys
+from ctypes import wintypes
+from types import SimpleNamespace
 
 import pytest
 
 from stellaris_autopilot.windows import DriverError, WindowsDriver, client_point, validate_steps
+
+
+class FakePyAutoGUIException(Exception):
+    pass
+
+
+class FakeFailSafeException(FakePyAutoGUIException):
+    """Match PyAutoGUI's hierarchy without importing its native input backend."""
+
+
+class FakeHitTestUser32:
+    """A point may hit a child or overlay while the game remains foreground."""
+
+    def __init__(self, hit=1, roots=None):
+        self.hit = hit
+        self.roots = {1: 1} if roots is None else roots
+        self.points = []
+
+    def WindowFromPoint(self, point):
+        self.points.append((point.x, point.y))
+        return self.hit
+
+    def GetAncestor(self, hwnd, flags):
+        assert flags == 2  # GA_ROOT, preserving child-window membership.
+        return self.roots.get(hwnd, 0)
+
+
+def install_fake_hit_test(driver, user=None):
+    driver._wintypes = wintypes
+    driver._user32 = FakeHitTestUser32() if user is None else user
+
+
+@pytest.fixture
+def click_driver():
+    from stellaris_autopilot.windows import _Window
+
+    calls = []
+    class GUI:
+        def moveTo(self, x, y, duration):
+            calls.append(("moveTo", x, y))
+        def click(self, button):
+            calls.append(("click", button))
+        def press(self, key):
+            calls.append(("press", key))
+    driver = object.__new__(WindowsDriver)
+    driver._window = lambda: _Window(1, "Stellaris", 0, 0, 1920, 1080)
+    driver._gui = GUI()
+    install_fake_hit_test(driver)
+    return driver, calls
+
+
+def test_hit_test_win32_bindings_use_point_by_value_and_pointer_sized_handles(monkeypatch):
+    class Library:
+        def __getattr__(self, name):
+            function = SimpleNamespace()
+            setattr(self, name, function)
+            return function
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: Library(), raising=False)
+    driver = object.__new__(WindowsDriver)
+    driver._bind_win32()
+    assert driver._user32.WindowFromPoint.argtypes == [wintypes.POINT]
+    assert driver._user32.WindowFromPoint.restype is wintypes.HWND
+    assert driver._user32.GetAncestor.argtypes == [wintypes.HWND, wintypes.UINT]
+    assert driver._user32.GetAncestor.restype is wintypes.HWND
+
+
+@pytest.mark.parametrize("hit", [1, 2])
+def test_click_accepts_verified_game_root_and_game_child(click_driver, hit):
+    driver, calls = click_driver
+    install_fake_hit_test(driver, FakeHitTestUser32(hit=hit, roots={1: 1, 2: 1}))
+    driver.execute([{"kind": "click", "x": 0.5, "y": 0.5}])
+    assert calls == [("moveTo", 960, 540), ("click", "left")]
+    assert driver._user32.points == [(960, 540), (960, 540)]
+
+
+@pytest.mark.parametrize("hit,roots", [(2, {1: 1, 2: 2}), (3, {1: 1, 3: 2})])
+def test_click_rejects_foreign_overlay_before_moving_even_with_game_foreground(click_driver, hit, roots):
+    driver, calls = click_driver
+    install_fake_hit_test(driver, FakeHitTestUser32(hit=hit, roots=roots))
+    with pytest.raises(DriverError, match="covered by another window"):
+        driver.execute([{"kind": "click", "x": 0.5, "y": 0.5}, {"kind": "key", "key": "2"}])
+    assert calls == []
+
+
+@pytest.mark.parametrize("hit,roots,message", [
+    (0, {1: 1}, "cannot identify the window"),
+    (2, {1: 1}, "cannot identify the root window"),
+    (1, {}, "cannot verify Stellaris root window"),
+    (1, {1: 2}, "cannot verify Stellaris root window"),
+])
+def test_click_hit_test_failure_prevents_all_input(click_driver, hit, roots, message):
+    driver, calls = click_driver
+    install_fake_hit_test(driver, FakeHitTestUser32(hit=hit, roots=roots))
+    with pytest.raises(DriverError, match=message):
+        driver.execute([{"kind": "click", "x": 0.5, "y": 0.5}, {"kind": "key", "key": "2"}])
+    assert calls == []
+
+
+@pytest.mark.parametrize("new_hit,roots,message", [
+    (2, {1: 1, 2: 2}, "covered by another window"),
+    (0, {1: 1}, "cannot identify the window"),
+    (2, {1: 1}, "cannot identify the root window"),
+])
+def test_click_rechecks_point_after_mouse_move(click_driver, new_hit, roots, message):
+    driver, calls = click_driver
+    user = FakeHitTestUser32(roots=roots)
+    install_fake_hit_test(driver, user)
+    def move_to(x, y, duration):
+        calls.append(("moveTo", x, y))
+        user.hit = new_hit
+    driver._gui.moveTo = move_to
+    with pytest.raises(DriverError, match=message):
+        driver.execute([{"kind": "click", "x": 0.5, "y": 0.5}, {"kind": "key", "key": "2"}])
+    assert calls == [("moveTo", 960, 540)]
+    assert user.points == [(960, 540), (960, 540)]
+
+
+def test_click_still_rejects_game_window_movement_after_mouse_move(click_driver):
+    from stellaris_autopilot.windows import _Window
+
+    driver, calls = click_driver
+    windows = iter([
+        _Window(1, "Stellaris", 0, 0, 1920, 1080),
+        _Window(1, "Stellaris", 100, 0, 1920, 1080),
+    ])
+    driver._window = lambda: next(windows)
+    with pytest.raises(DriverError, match="window moved or changed"):
+        driver.execute([{"kind": "click", "x": 0.5, "y": 0.5}, {"kind": "key", "key": "2"}])
+    assert calls == [("moveTo", 960, 540)]
 
 
 def test_valid_game_macro():
@@ -140,6 +272,7 @@ def test_click_rechecks_window_after_mouse_move():
     driver = object.__new__(WindowsDriver)
     driver._window = guard
     driver._gui = GUI()
+    install_fake_hit_test(driver)
     with pytest.raises(DriverError, match="focus lost"):
         driver.execute([{"kind": "click", "x": 0.5, "y": 0.5}])
     assert calls == [(960, 540)]
@@ -214,13 +347,81 @@ def test_stop_file_prevents_console_opening(tmp_path):
 
 def test_wait_observes_pyautogui_failsafe_without_next_input():
     class GUI:
+        FailSafeException = FakeFailSafeException
         def failSafeCheck(self):
-            raise DriverError("fail-safe triggered")
+            raise FakeFailSafeException("corner reached")
+        def press(self, key):
+            pytest.fail("must not send input after the emergency stop")
     driver = object.__new__(WindowsDriver)
     driver._window = lambda: None
     driver._gui = GUI()
+    with pytest.raises(DriverError, match="fail-safe") as caught:
+        driver.execute([{"kind": "wait", "seconds": 5}, {"kind": "key", "key": "1"}])
+    assert isinstance(caught.value.__cause__, FakeFailSafeException)
+
+
+@pytest.mark.parametrize("method,step,expected_calls", [
+    ("moveTo", {"kind": "click", "x": 0.5, "y": 0.5}, ["moveTo"]),
+    ("click", {"kind": "click", "x": 0.5, "y": 0.5}, ["moveTo", "click"]),
+    ("press", {"kind": "key", "key": "1"}, ["press"]),
+    ("hotkey", {"kind": "hotkey", "keys": ["ctrl", "s"]}, ["hotkey"]),
+])
+def test_input_call_failsafe_is_driver_error_and_prevents_later_input(method, step, expected_calls):
+    from stellaris_autopilot.windows import _Window
+
+    calls = []
+    class GUI:
+        FailSafeException = FakeFailSafeException
+        def __getattr__(self, name):
+            def invoke(*args, **kwargs):
+                if name == "failSafeCheck":
+                    return
+                calls.append(name)
+                if name == method:
+                    raise FakeFailSafeException("corner reached during input")
+            return invoke
+    driver = object.__new__(WindowsDriver)
+    driver._window = lambda: _Window(1, "Stellaris", 0, 0, 1920, 1080)
+    driver._gui = GUI()
+    install_fake_hit_test(driver)
     with pytest.raises(DriverError, match="fail-safe"):
-        driver.execute([{"kind": "wait", "seconds": 5}])
+        driver.execute([step, {"kind": "key", "key": "2"}])
+    assert calls == expected_calls
+
+
+def test_console_write_failsafe_preserves_partial_input_without_cleanup():
+    calls = []
+    class GUI:
+        FailSafeException = FakeFailSafeException
+        def press(self, key):
+            calls.append(("press", key))
+        def write(self, text, interval):
+            calls.append(("write", text))
+            raise FakeFailSafeException("corner reached while typing")
+    driver = object.__new__(WindowsDriver)
+    driver._window = lambda: None
+    driver._wait = lambda seconds: None
+    driver._gui = GUI()
+    with pytest.raises(DriverError, match="fail-safe"):
+        driver.execute_event("saa.1", "0")
+    assert calls == [("press", "`"), ("write", "e")]
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt(), ValueError("unrelated GUI error")])
+def test_gui_boundary_preserves_other_exceptions_without_later_input(error):
+    calls = []
+    class GUI:
+        FailSafeException = FakeFailSafeException
+        def press(self, key):
+            calls.append(key)
+            raise error
+    driver = object.__new__(WindowsDriver)
+    driver._window = lambda: None
+    driver._gui = GUI()
+    with pytest.raises(type(error)) as caught:
+        driver.execute([{"kind": "key", "key": "1"}, {"kind": "key", "key": "2"}])
+    assert caught.value is error
+    assert calls == ["1"]
 
 
 def test_window_identity_is_pinned_to_first_verified_game_process():

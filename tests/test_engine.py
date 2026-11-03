@@ -1,4 +1,5 @@
 from copy import deepcopy
+from dataclasses import replace
 import time
 import sqlite3
 import subprocess
@@ -109,6 +110,70 @@ def test_missing_expected_field_is_not_treated_as_success(harness):
     assert result["status"] == "blocked"
     assert "Unobservable" in result["reason"]
     assert not journal.records() and not driver.calls
+
+
+def test_explicitly_authorized_new_expected_path_requires_a_matching_new_save(harness):
+    engine, config, journal, driver, before, after = harness
+    config.actions["select_physics"] = replace(config.actions["select_physics"],
+                                              allow_new_expected_paths=["research.physics"])
+    before.state["research"] = {}
+    before.state["metadata"]["missing_fields"] = ["research"]
+    result = engine.run(Proposal("select_physics", "First physics selection"), before, live=True)
+    assert result["status"] == "verified"
+    assert len(driver.calls) == 1
+    assert journal.records()[0]["status"] == "verified"
+    assert after.digest in journal.records()[0]["detail"]
+    assert before.state["research"] == {}  # Unknown was never replaced with a guessed baseline.
+
+
+@pytest.mark.parametrize("failure", ["wrong_value", "still_missing", "same_digest", "older_mtime"])
+def test_new_expected_path_cannot_verify_without_fresh_exact_evidence(harness, failure):
+    engine, config, journal, driver, before, after = harness
+    config.actions["select_physics"] = replace(config.actions["select_physics"],
+                                              allow_new_expected_paths=["research.physics"])
+    before.state["research"] = {}
+    if failure == "wrong_value":
+        after.state["research"]["physics"] = "tech_other"
+    elif failure == "still_missing":
+        after.state["research"] = {}
+    elif failure == "same_digest":
+        after = Observation(after.state, before.digest, after.modified_at)
+    else:
+        after = Observation(after.state, after.digest, before.modified_at - 0.001)
+    engine.observer = Observer(before, after)
+    result = engine.run(Proposal("select_physics", "First physics selection"), before, live=True)
+    assert result["status"] == "unverified"
+    assert len(driver.calls) == 1
+    assert journal.records()[0]["status"] == "unverified"
+    assert journal.unresolved()
+    retry = engine.run(Proposal("select_physics", "Do not retry ambiguous input"), before, live=True)
+    assert retry["status"] == "blocked" and len(driver.calls) == 1
+
+
+def test_new_expected_path_opt_in_does_not_bypass_missing_preconditions(harness):
+    engine, config, journal, driver, before, _ = harness
+    config.actions["select_physics"] = replace(
+        config.actions["select_physics"],
+        allow_new_expected_paths=["research.physics"],
+        preconditions=[{"path": "research.physics", "op": "eq", "value": "tech_lasers_1"}],
+    )
+    before.state["research"] = {}
+    result = engine.run(Proposal("select_physics", "Missing precondition"), before, live=True)
+    assert result["status"] == "blocked" and "Unobservable" in result["reason"]
+    assert not driver.calls and not journal.records()
+
+
+def test_new_expected_path_opt_in_never_supplies_a_change_baseline(harness):
+    engine, config, journal, driver, before, _ = harness
+    config.actions["select_physics"] = replace(
+        config.actions["select_physics"],
+        allow_new_expected_paths=["research.physics"],
+        expected=[{"path": "research.physics", "op": "changed"}],
+    )
+    before.state["research"] = {}
+    result = engine.run(Proposal("select_physics", "Missing change baseline"), before, live=True)
+    assert result["status"] == "blocked" and "Unobservable" in result["reason"]
+    assert not driver.calls and not journal.records()
 
 
 def test_failed_precondition_prevents_input(harness):

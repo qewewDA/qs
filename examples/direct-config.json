@@ -1,0 +1,16 @@
+{
+  "user_dir": "C:/path/to/isolated_stellaris",
+  "state_dir": "C:/path/to/qs_direct_state",
+  "country_id": "0",
+  "campaign_id": "REPLACE_WITH_INSPECTED_CAMPAIGN_ID",
+  "verified_game_version": "REPLACE_WITH_TESTED_GAME_VERSION",
+  "session_token": "00000000000000000000000000000000",
+  "allowed_actions": [],
+  "allowed_orders": [],
+  "allowed_native_actions": [],
+  "single_player_confirmed": false,
+  "non_ironman_confirmed": false,
+  "max_snapshot_age_seconds": 180,
+  "verification_timeout_seconds": 60,
+  "poll_seconds": 1
+}

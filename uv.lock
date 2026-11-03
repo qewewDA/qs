@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -231,6 +231,17 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/b6/b1/d9121a717e0f893c64bd6ca7702614778d7df2a5c309128a002421788516/cryptography-50.0.2-pp311-pypy311_pp73-manylinux_2_34_x86_64.whl", hash = "sha256:1ba34f04897fcdaa73f74145c25f3ec146fbd56593853e88adc2e811303c5f42", size = 4726322, upload-time = "2026-09-30T15:29:54.263Z" },
     { url = "https://files.pythonhosted.org/packages/36/8b/e6d153808bf353e152abd2fd4d8f09670d956ac78379ac46e60d7efbf04c/cryptography-50.0.2-pp311-pypy311_pp80-macosx_11_0_arm64.whl", hash = "sha256:3dc4fd8058cea1644971207d530e1a03a184a805ffc8ebdddf0599d78a331b81", size = 3873097, upload-time = "2026-09-30T15:29:56.097Z" },
     { url = "https://files.pythonhosted.org/packages/ca/1d/1271f287ff7170ddafc2aad36260c4eec20ccd2fea70f38455e9d56d427b/cryptography-50.0.2-pp311-pypy311_pp80-win_amd64.whl", hash = "sha256:7b75de3c8b3be1cdb1052747c929440c3eea46c1bc2cb8a6e3a48388e9b7b452", size = 3805376, upload-time = "2026-09-30T15:29:58.729Z" },
+]
+
+[[package]]
+name = "frida"
+version = "17.9.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/01/12/8b01e94ebd5cee6942b77b387b575f67d529ee52f8f6adfd1c5e9df388b5/frida-17.9.4.tar.gz", hash = "sha256:cef5c9052c3ab61dcea43cedfd4ae836278069fa2726ed47ee82ac034f5d6e6d", size = 927418, upload-time = "2026-05-02T14:52:06.759Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0d/9f/92348b744db31ec27b73c62a82ca008c92cfa7f73aea8f70c020680ea500/frida-17.9.4-cp37-abi3-win32.whl", hash = "sha256:7bde2833e8c489be06cb37b9417923e59df09587723278875105a438e0f8c334", size = 39314367, upload-time = "2026-05-02T14:51:58.328Z" },
+    { url = "https://files.pythonhosted.org/packages/ba/ff/ea253131d5415ebe09edba51bd69fb93ffed12983d045841d5709bc29275/frida-17.9.4-cp37-abi3-win_amd64.whl", hash = "sha256:1ccee705320b87b70481b5dc021ea60bfa8a3190c9448f53559ce666e1221d96", size = 41961252, upload-time = "2026-05-02T14:52:01.141Z" },
+    { url = "https://files.pythonhosted.org/packages/d4/3a/e7979d92773d5e42fd5e6fec1bd0eb8aacbdfaffca4aea40e1741f86c31f/frida-17.9.4-cp37-abi3-win_arm64.whl", hash = "sha256:7c4f8ab238bf23ee4ac84ad9e741f670f7c7d861bc268dc6704f2c7c988d879a", size = 51846114, upload-time = "2026-05-02T14:52:04.173Z" },
 ]
 
 [[package]]
@@ -946,18 +957,22 @@ dev = [
 mcp = [
     { name = "mcp" },
 ]
+native = [
+    { name = "frida", marker = "sys_platform == 'win32'" },
+]
 windows = [
     { name = "pyautogui", marker = "sys_platform == 'win32'" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "frida", marker = "sys_platform == 'win32' and extra == 'native'", specifier = "==17.9.4" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.20,<2" },
     { name = "pyautogui", marker = "sys_platform == 'win32' and extra == 'windows'", specifier = "==0.9.54" },
     { name = "pytest", marker = "extra == 'dev'", specifier = "==8.4.2" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.14.3" },
 ]
-provides-extras = ["windows", "dev", "mcp"]
+provides-extras = ["windows", "dev", "mcp", "native"]
 
 [[package]]
 name = "typing-extensions"

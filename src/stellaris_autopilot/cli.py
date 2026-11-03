@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from importlib import metadata
 import json
 import shutil
 import sqlite3
@@ -24,8 +25,22 @@ def emit(value):
 
 def install_mod(mod_dir: Path):
     source = Path(__file__).resolve().parents[2] / "mod" / "stellaris_ai_autopilot"
-    if not source.exists():
+    if not source.is_dir():
         source = Path(sys.prefix) / "share" / "stellaris-ai-autopilot" / "mod"
+    if not source.is_dir():
+        # Isolated runners may load the wheel from a cache separate from
+        # sys.prefix. RECORD paths locate that installation's data files.
+        try:
+            package = metadata.distribution("stellaris-ai-autopilot")
+        except metadata.PackageNotFoundError:
+            pass
+        else:
+            for resource in package.files or ():
+                if resource.parts[-4:] == ("share", "stellaris-ai-autopilot", "mod", "descriptor.mod"):
+                    descriptor = Path(package.locate_file(resource))
+                    if descriptor.is_file():
+                        source = descriptor.parent
+                        break
     if not source.is_dir():
         raise ValueError("Bundled Mod data missing; install from a complete wheel or source checkout")
     destination = mod_dir.expanduser().resolve() / "stellaris_ai_autopilot"
@@ -140,6 +155,8 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--continuous", action="store_true", help="Observe new saves until stopped or horizon reached")
     run.add_argument("--years", type=int, default=10)
     run.add_argument("--arm-delay", type=float, default=5, help="Seconds to focus the game before live dispatch")
+    direct_mcp = commands.add_parser("direct-mcp", help="Experimental keyboardless connection probes over MCP")
+    direct_mcp.add_argument("--config", type=Path, required=True)
     for name in ("stop", "journal", "reconcile", "mcp", "doctor"):
         child = commands.add_parser(name)
         child.add_argument("--config", type=Path, required=True)
@@ -167,6 +184,12 @@ def main(argv=None) -> int:
             emit(WindowsDriver().client_position())
         elif args.command == "run":
             return run_loop(args)
+        elif args.command == "direct-mcp":
+            try:
+                from .direct_mcp import build_direct_server
+            except ImportError:
+                raise ValueError('Install MCP integration with: pip install ".[mcp]"') from None
+            build_direct_server(args.config).run(transport="stdio")
         else:
             cfg = load_config(args.config)
             if args.command == "stop":

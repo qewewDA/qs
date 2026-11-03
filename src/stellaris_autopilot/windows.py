@@ -165,6 +165,10 @@ class WindowsDriver:
         user.GetClientRect.restype = wintypes.BOOL
         user.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
         user.ClientToScreen.restype = wintypes.BOOL
+        user.WindowFromPoint.argtypes = [wintypes.POINT]
+        user.WindowFromPoint.restype = wintypes.HWND
+        user.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        user.GetAncestor.restype = wintypes.HWND
         user.IsIconic.argtypes = [wintypes.HWND]
         user.IsIconic.restype = wintypes.BOOL
         kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
@@ -239,13 +243,37 @@ class WindowsDriver:
         self._target_pid = process_id.value
         return _Window(hwnd, title.value, origin.x, origin.y, width, height)
 
+    def _check_click_target(self, window: _Window, x: int, y: int) -> None:
+        """Reject overlays even when Stellaris still owns keyboard focus."""
+        user = self._user32
+        ga_root = 2
+        root = user.GetAncestor(window.handle, ga_root)
+        if not root or root != window.handle:
+            raise DriverError("cannot verify Stellaris root window for click")
+        hit = user.WindowFromPoint(self._wintypes.POINT(x, y))
+        if not hit:
+            raise DriverError("cannot identify the window at the click point")
+        hit_root = user.GetAncestor(hit, ga_root)
+        if not hit_root:
+            raise DriverError("cannot identify the root window at the click point")
+        if hit_root != root:
+            raise DriverError(f"click point {(x, y)} is covered by another window; refusing input")
+
+    def _call_gui(self, method: str, *args: Any, **kwargs: Any) -> Any:
+        """Keep PyAutoGUI's emergency stop inside the driver's error boundary."""
+        fail_safe_error = getattr(self._gui, "FailSafeException", ())
+        try:
+            return getattr(self._gui, method)(*args, **kwargs)
+        except fail_safe_error as exc:
+            raise DriverError("PyAutoGUI fail-safe triggered; game input interrupted") from exc
+
     def _check_stop(self) -> None:
         stop_file = getattr(self, "stop_file", None)
         if stop_file is not None and stop_file.exists():
             raise DriverError("STOP file exists; game input interrupted")
         gui = getattr(self, "_gui", None)
         if gui is not None and hasattr(gui, "failSafeCheck"):
-            gui.failSafeCheck()
+            self._call_gui("failSafeCheck")
 
     def _wait(self, seconds: float) -> None:
         """Bounded waits remain interruptible by STOP, focus loss and fail-safe."""
@@ -261,7 +289,7 @@ class WindowsDriver:
     def client_position(self) -> dict:
         """Return mouse coordinates for manual calibration, without clicking."""
         window = self._window()
-        x, y = self._gui.position()
+        x, y = self._call_gui("position")
         if not window.left <= x < window.left + window.width or not window.top <= y < window.top + window.height:
             raise DriverError("mouse is outside Stellaris's client area")
         return {
@@ -280,15 +308,17 @@ class WindowsDriver:
             kind = step["kind"]
             if kind == "click":
                 x, y = client_point(step["x"], step["y"], window.left, window.top, window.width, window.height)
-                self._gui.moveTo(x, y, duration=0.08)
+                self._check_click_target(window, x, y)
+                self._call_gui("moveTo", x, y, duration=0.08)
                 current = self._window()
                 if current != window:
                     raise DriverError("Stellaris window moved or changed before click")
-                self._gui.click(button=step.get("button", "left"))
+                self._check_click_target(current, x, y)
+                self._call_gui("click", button=step.get("button", "left"))
             elif kind == "key":
-                self._gui.press(step["key"])
+                self._call_gui("press", step["key"])
             elif kind == "hotkey":
-                self._gui.hotkey(*step["keys"])
+                self._call_gui("hotkey", *step["keys"])
             else:
                 self._wait(step["seconds"])
         # A successful transport is not a successful game action. The caller
@@ -314,15 +344,15 @@ class WindowsDriver:
             raise DriverError("console_key must be a supported calibrated console key")
         self._check_stop()
         self._window()
-        self._gui.press(console_key)
+        self._call_gui("press", console_key)
         self._wait(0.15)
         for character in f"event {event_id} {country_id}":
             self._check_stop()
             self._window()
-            self._gui.write(character, interval=0.03)
+            self._call_gui("write", character, interval=0.03)
         self._check_stop()
         self._window()
-        self._gui.press("enter")
+        self._call_gui("press", "enter")
         self._wait(0.15)
         self._window()
-        self._gui.press(console_key)
+        self._call_gui("press", console_key)

@@ -260,6 +260,36 @@ def test_rejected_live_setup_does_not_create_journal(loop_harness, capsys):
     assert not (config.parent / "runtime").exists()
 
 
+@pytest.mark.parametrize("failing_method", ["failSafeCheck", "position"])
+def test_calibration_failsafe_has_controlled_error_exit(monkeypatch, capsys, failing_method):
+    import stellaris_autopilot.cli as cli
+    import stellaris_autopilot.windows as windows
+
+    class FailSafeException(Exception):
+        pass
+
+    class GUI:
+        def __getattr__(self, method):
+            if method == "FailSafeException":
+                return FailSafeException
+            def invoke():
+                if method == failing_method:
+                    raise FailSafeException("corner reached")
+                return (100, 100)
+            return invoke
+
+    driver = object.__new__(windows.WindowsDriver)
+    driver._gui = GUI()
+    def checked_window():
+        driver._check_stop()
+        return windows._Window(1, "Stellaris", 0, 0, 1920, 1080)
+    driver._window = checked_window
+    monkeypatch.setattr(windows, "WindowsDriver", lambda: driver)
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: None)
+    assert main(["calibrate", "--delay", "0"]) == 2
+    assert "Error: PyAutoGUI fail-safe triggered" in capsys.readouterr().err
+
+
 def test_mod_launcher_created_during_install_is_not_overwritten(tmp_path, monkeypatch, capsys):
     import stellaris_autopilot.cli as cli
 

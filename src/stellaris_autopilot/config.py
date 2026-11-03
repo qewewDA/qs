@@ -20,6 +20,7 @@ class Action:
     event: str | None = None
     preconditions: list[dict] = field(default_factory=list)
     expected: list[dict] = field(default_factory=list)
+    allow_new_expected_paths: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -88,6 +89,16 @@ def load_config(path: str | Path) -> Config:
             raise ValueError("Every action needs observable expected predicates")
         for predicate in action.preconditions + action.expected:
             validate_predicate(predicate)
+        new_paths = action.allow_new_expected_paths
+        if not isinstance(new_paths, list) or any(not isinstance(item, str) for item in new_paths):
+            raise ValueError("allow_new_expected_paths must be a list of expected path strings")
+        if len(new_paths) != len(set(new_paths)):
+            raise ValueError("allow_new_expected_paths must not contain duplicate paths")
+        for new_path in new_paths:
+            matching = [predicate for predicate in action.expected if predicate["path"] == new_path]
+            if not matching or any(predicate["op"] != "eq" or not _explicit_value(predicate.get("value"))
+                                   for predicate in matching):
+                raise ValueError("New expected paths require exact eq predicates with explicit nonempty values")
         actions[action.id] = action
     for key in ("save_path", "state_dir", "log_path"):
         if key in raw and not (key == "log_path" and raw[key] is None):
@@ -135,3 +146,17 @@ def load_config(path: str | Path) -> Config:
         validate_steps(cfg.save_steps)
     # Save macros are also local trusted configuration, never model generated.
     return cfg
+
+
+def _explicit_value(value: object) -> bool:
+    """New postcondition paths must target a known scalar, never an empty/unknown value."""
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, (int, float)):
+        try:
+            return math.isfinite(value)
+        except OverflowError:
+            return False
+    return False

@@ -67,6 +67,67 @@ def test_empty_actions_are_a_valid_observer_only_profile(tmp_path):
     assert not config.actions and not config.allowed_actions
 
 
+def test_new_expected_paths_require_explicit_local_opt_in(tmp_path):
+    default = load_config(write_config(tmp_path, BASE))
+    assert default.actions["physics"].allow_new_expected_paths == []
+    raw = deepcopy(BASE)
+    raw["actions"][0]["allow_new_expected_paths"] = ["research.physics"]
+    config = load_config(write_config(tmp_path, raw))
+    assert config.actions["physics"].allow_new_expected_paths == ["research.physics"]
+
+
+@pytest.mark.parametrize("paths", [
+    None, "research.physics", {}, [None], [123], [[]], [""], ["missing.path"],
+    ["research.physics", "research.physics"],
+])
+def test_invalid_new_expected_paths_are_actionable_config_errors(tmp_path, paths):
+    raw = deepcopy(BASE)
+    raw["actions"][0]["allow_new_expected_paths"] = paths
+    with pytest.raises(ValueError):
+        load_config(write_config(tmp_path, raw))
+
+
+@pytest.mark.parametrize("predicate", [
+    {"path": "research.physics", "op": "changed"},
+    {"path": "research.physics", "op": "exists"},
+    {"path": "research.physics", "op": "contains", "value": "tech_lasers_2"},
+    {"path": "research.physics", "op": "gte", "value": 1},
+    *({"path": "research.physics", "op": "eq", "value": value}
+      for value in (None, "", "  ", [], {}, float("nan"), float("inf"))),
+])
+def test_new_expected_paths_require_exact_nonempty_known_values(tmp_path, predicate):
+    raw = deepcopy(BASE)
+    raw["actions"][0].update(allow_new_expected_paths=["research.physics"], expected=[predicate])
+    with pytest.raises(ValueError):
+        load_config(write_config(tmp_path, raw))
+
+
+def test_new_expected_paths_cannot_hide_a_change_predicate_on_the_same_path(tmp_path):
+    raw = deepcopy(BASE)
+    raw["actions"][0]["allow_new_expected_paths"] = ["research.physics"]
+    raw["actions"][0]["expected"].append({"path": "research.physics", "op": "changed"})
+    with pytest.raises(ValueError):
+        load_config(write_config(tmp_path, raw))
+
+
+def test_a_precondition_path_alone_cannot_authorize_a_new_expected_path(tmp_path):
+    raw = deepcopy(BASE)
+    raw["actions"][0].update(
+        allow_new_expected_paths=["resources.alloys"],
+        preconditions=[{"path": "resources.alloys", "op": "gte", "value": 100}],
+    )
+    with pytest.raises(ValueError):
+        load_config(write_config(tmp_path, raw))
+
+
+@pytest.mark.parametrize("value", [0, False, 1.5, "tech_physics_1"])
+def test_explicit_scalar_targets_remain_distinct_from_unknown(tmp_path, value):
+    raw = deepcopy(BASE)
+    raw["actions"][0]["allow_new_expected_paths"] = ["research.physics"]
+    raw["actions"][0]["expected"][0]["value"] = value
+    assert load_config(write_config(tmp_path, raw)).actions["physics"].expected[0]["value"] == value
+
+
 @pytest.mark.parametrize("predicate", [
     {"path": "x", "op": "execute", "value": "shell"},
     {"path": "", "op": "eq", "value": 0},

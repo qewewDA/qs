@@ -15,12 +15,16 @@ dependencies = []
 windows = ["PyAutoGUI==0.9.54; sys_platform == 'win32'"]
 dev = ["pytest==8.4.2", "ruff==0.14.3"]
 mcp = ["mcp>=1.20,<2"]
+native = ["frida==17.9.4; sys_platform == 'win32'"]
 
 [project.scripts]
 stellaris-autopilot = "stellaris_autopilot.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+stellaris_autopilot = ["native*.js"]
 
 [tool.setuptools.data-files]
 "share/stellaris-ai-autopilot/mod" = ["mod/stellaris_ai_autopilot/descriptor.mod"]
