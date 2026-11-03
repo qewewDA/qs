@@ -1,4 +1,4 @@
-"""Pinned-build native research transport, only for a launcher-owned test game.
+"""Pinned-build normal command transport for verified Windows games.
 
 Uses the game's normal research command factory, validator and dispatcher.
 The model supplies an observed candidate ID, never addresses or JavaScript.
@@ -19,6 +19,7 @@ import sys
 import threading
 
 from .owned_process import OwnedGameProcess
+from .attached_process import AttachedGameProcess
 
 
 PINNED_EXE_SHA256 = "400df27c82ddc845aa9dce79bd468d81f18f060d299cd263e3afa93aef4f7a83"
@@ -293,12 +294,15 @@ def verify_research(state: dict, selection: ResearchSelection) -> bool:
 
 
 class NativeResearchBridge:
-    """A private, serialized worker for the exact game process the launcher owns."""
+    """A private, serialized worker for an owned or independently verified attached game."""
 
-    def __init__(self, process: subprocess.Popen | OwnedGameProcess, executable: Path, state_dir: Path):
-        if sys.platform != "win32" or not isinstance(process, (subprocess.Popen, OwnedGameProcess)) or process.poll() is not None:
-            raise ValueError("Native research requires a live launcher-owned Windows game")
-        if isinstance(process, OwnedGameProcess) and process.executable != Path(executable).resolve():
+    def __init__(self, process: subprocess.Popen | OwnedGameProcess | AttachedGameProcess,
+                 executable: Path, state_dir: Path):
+        if (sys.platform != "win32"
+                or not isinstance(process, (subprocess.Popen, OwnedGameProcess, AttachedGameProcess))
+                or process.poll() is not None):
+            raise ValueError("Native research requires a live verified Windows game")
+        if isinstance(process, (OwnedGameProcess, AttachedGameProcess)) and process.executable != Path(executable).resolve():
             raise ValueError("The owned native game executable identity does not match")
         if hashlib.sha256(Path(executable).read_bytes()).hexdigest() != PINNED_EXE_SHA256:
             raise ValueError("Unsupported executable hash; native calls are disabled")
@@ -415,6 +419,20 @@ class NativeResearchBridge:
         if not isinstance(token, str) or not _TOKEN.fullmatch(token):
             raise ValueError("Invalid native observation token")
         return self._call("enqueue", {"kind": "request_observation", "country_id": "0", "token": token})
+
+    def bind_existing_window(self, token: str) -> dict:
+        if not isinstance(self.game, AttachedGameProcess):
+            raise ValueError("Window discovery is only for a verified attached game")
+        if not isinstance(token, str) or not _TOKEN.fullmatch(token):
+            raise ValueError("Invalid attachment token")
+        return self._call("bind_window", token)
+
+    def load_attached_events(self, token: str) -> dict:
+        if not isinstance(self.game, AttachedGameProcess):
+            raise ValueError("Runtime event loading is only for a verified attached game")
+        if not isinstance(token, str) or not _TOKEN.fullmatch(token):
+            raise ValueError("Invalid attachment token")
+        return self._call("enqueue", {"kind": "load_attached_events", "country_id": "0", "token": token})
 
     def run_inbox(self, token: str) -> dict:
         if not isinstance(token, str) or not _TOKEN.fullmatch(token):

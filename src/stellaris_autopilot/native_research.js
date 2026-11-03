@@ -1,4 +1,4 @@
-/* Exact-build research command experiment. Host pins the EXE hash, an owned
+/* Exact-build research command experiment. Host pins the EXE hash, a verified
  * process, campaign/session and fresh visible alternatives. This fixed script
  * accepts observed candidate IDs; submitted never means gameplay verified.
  */
@@ -212,6 +212,21 @@ function fixedInbox() {
     finally { cleanString(text); }
 }
 
+function loadAttachedEvents(token) {
+    if (pauseState().paused !== true) throw new NativePreconditionError('Pause before loading the attached bridge');
+    const manager = base.add(0x3152ca8).readPointer();
+    if (manager.isNull()) throw new NativePreconditionError('Event manager unavailable');
+    const filename = 'qs_attach_events_' + token + '.txt';
+    const text = Memory.alloc(0x30);
+    text.writeByteArray(new Uint8Array(0x30));
+    text.add(0x28).writeU64(15);
+    assignString(text, Memory.allocUtf8String(filename), filename.length);
+    try {
+        const loadFile = new NativeFunction(base.add(0x3f3c50), 'void', ['pointer','pointer','uint8'], 'win64');
+        loadFile(manager, text, 0);
+    } finally { cleanString(text); }
+}
+
 function wakeGame(token) {
     if (gameThread === null) return false; // The load bootstrap will consume it.
     try {
@@ -294,6 +309,12 @@ function consumePending(source = 'run') {
             if (request.kind === 'run_inbox') {
                 fixedInbox();
                 states.set(request.token, {status: 'inbox_executed', consumed: true,
+                    game_thread_id: Process.getCurrentThreadId(), execution_source: source, runtime: pauseState()});
+                return;
+            }
+            if (request.kind === 'load_attached_events') {
+                loadAttachedEvents(request.token);
+                states.set(request.token, {status: 'events_load_returned', consumed: true,
                     game_thread_id: Process.getCurrentThreadId(), execution_source: source, runtime: pauseState()});
                 return;
             }
@@ -410,6 +431,33 @@ Interceptor.attach(base.add(0xeba020), {
 });
 
 rpc.exports = {
+    bindwindow(token) {
+        if (typeof token !== 'string' || !/^[0-9a-f]{32}$/.test(token)) throw new Error('Invalid binding token');
+        if (pending !== null || inFlight || wakeTransport !== null || gameThread !== null) {
+            throw new Error('The native bridge is already bound or busy');
+        }
+        const user32 = Process.getModuleByName('user32.dll');
+        const enumerate = new NativeFunction(user32.getExportByName('EnumWindows'), 'int32', ['pointer','pointer'], 'win64');
+        const threadOf = new NativeFunction(user32.getExportByName('GetWindowThreadProcessId'), 'uint32', ['pointer','pointer'], 'win64');
+        const textOf = new NativeFunction(user32.getExportByName('GetWindowTextW'), 'int32', ['pointer','pointer','int32'], 'win64');
+        const candidates = [];
+        const callback = new NativeCallback((window, _) => {
+            const owner = Memory.alloc(4);
+            const thread = threadOf(window, owner);
+            if (owner.readU32() === Process.id) {
+                const title = Memory.alloc(1024);
+                const length = textOf(window, title, 512);
+                if (length > 0 && title.readUtf16String(length).includes('Stellaris')) candidates.push({window, thread});
+            }
+            return 1;
+        }, 'int32', ['pointer','pointer'], 'win64');
+        enumerate(callback, ptr(0));
+        if (candidates.length !== 1) throw new Error('No unique existing Stellaris window');
+        const state = base.add(0x3114e68).readPointer();
+        if (state.isNull() || state.add(0xf90).readPointer().isNull()) throw new Error('Load a game before connecting');
+        gameThread = candidates[0].thread;
+        return {token, status: 'window_bound', game_thread_id: gameThread, runtime: pauseState()};
+    },
     lookup(key) {
         const value = technology(key);
         return {found: value !== null, technology: key};
@@ -421,7 +469,7 @@ rpc.exports = {
             throw new Error('Malformed or unauthorized native request');
         }
         let canonical;
-        if (['request_observation','run_inbox'].includes(request.kind) &&
+        if (['request_observation','run_inbox','load_attached_events'].includes(request.kind) &&
             Object.keys(request).sort().join(',') === 'country_id,kind,token') {
             canonical = {kind: request.kind, country_id: '0', token: request.token};
         } else if (request.kind === 'set_paused' &&

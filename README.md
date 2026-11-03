@@ -1,8 +1,10 @@
 # Stellaris AI Autopilot · 群星 AI 自动驾驶
 
-用 MCP 精确指挥单人《群星》：模型只能从新观察到的状态里选择具体星球、舰队、科技和已授权动作，不能提交控制台脚本、坐标、原生地址或文件路径。日常入口是持久战役启动器 `scripts/serve_campaign.py`：每次连接都从最近一次不可变检查点继续，不会重新从最初存档开始。
+> 一次接入，之后直接中文指挥：先生成离线入口，把 `stellaris_agent` 提示词发到同一个Agent对话一次，之后直接说中文命令。详见 [离线 AI 入口](docs/ai-entry.md)。
 
-Python 3.11+，Windows 10/11 为实机目标；MIT 开源。本文描述的持久战役 MCP 入口不发送键盘或鼠标输入；旧的 Windows 输入路径另述。仓库只包含源码、Mod 模板和测试，不附带游戏本体、知识 JSON、真实存档或本机 MCP 配置。
+用 MCP 精确指挥单人《群星》：模型只能从新观察到的状态里选择具体星球、舰队、科技和已授权动作，不能提交控制台脚本、坐标、原生地址或文件路径。推荐入口是附加已运行模式 `scripts/serve_existing_game.py`：你先正常打开群星、读档并暂停，MCP 只连接当前局，不启动也不关闭游戏。需要由启动器创建进程并从最近不可变检查点接续时，使用保留的持久战役启动器 `scripts/serve_campaign.py`。
+
+Python 3.11+，Windows 10/11 为实机目标；MIT 开源。本文描述的 MCP 入口不发送键盘或鼠标输入；旧的 Windows 输入路径另述。仓库只包含源码、Mod 模板和测试，不附带游戏本体、知识 JSON、真实存档或本机 MCP 配置。
 
 ## 当前能力与边界
 
@@ -25,6 +27,7 @@ Python 3.11+，Windows 10/11 为实机目标；MIT 开源。本文描述的持�
 
 ```powershell
 uv sync --frozen --extra dev --extra mcp --extra native
+uv run python scripts/serve_existing_game.py --help
 uv run python scripts/serve_campaign.py --help
 ```
 
@@ -37,6 +40,38 @@ uv run pytest -q
 ```
 
 `demo` 使用独立临时目录和 replay adapter，执行解析 → 授权 → 派单 → 新观察 → 后置条件 → SQLite 记录，输出 `SIMULATION` 和 `verified`。它不连接游戏，也不调用付费模型，不能当作实机验证。
+
+## 快速开始：附加已运行（推荐）
+
+先正常启动群星、手动读入要接续的存档并暂停；不要用本项目启动器启动这个实例。然后在仓库根目录运行：
+
+```powershell
+uv run python scripts/serve_existing_game.py `
+  --state-dir .\attached-state `
+  --game-dir "<Steam>\steamapps\common\Stellaris"
+```
+
+用户目录默认从 `game-dir\userdir.txt` 或 Documents 解析，也可以用 `--user-dir` 明确指定。同机有多个 `stellaris.exe` 时在本机加 `--pid`，不要让模型猜。`--extended` 与直连模式相同，`--knowledge-bundle` 可选。
+
+MCP 客户端配置示例（路径替换为本机实际值；`cwd` 指向仓库根目录）：
+
+```json
+{
+  "mcpServers": {
+    "stellaris-existing": {
+      "command": "<repo>\\.venv\\Scripts\\python.exe",
+      "args": [
+        "<repo>\\scripts\\serve_existing_game.py",
+        "--state-dir", "<attached-state>",
+        "--game-dir", "<Steam>\\steamapps\\common\\Stellaris"
+      ],
+      "cwd": "<repo>"
+    }
+  }
+}
+```
+
+该入口只附加当前已运行的游戏，不启动、不关闭、不自动载入旧检查点。连接成功后提供 `attached_status()`、`checkpoint_game()` 和 `disconnect_game(save=true)`：检查点写到游戏的 `save games/qs_mcp`，断开只释放 AI 接管，游戏继续运行。完整流程、身份校验、换档重连和常见问题见 [附加已运行群星](docs/attach-existing.md)。需要启动器自动加载最近检查点时，继续使用下面的持久战役模式。
 
 ## 快速开始：持久战役 MCP
 
@@ -129,8 +164,10 @@ Mod 安装命令不会覆盖已有 Mod；安装后需在 Paradox Launcher 播放
 ## 目录结构
 
 ```text
-scripts/serve_campaign.py   持久战役 MCP 启动器（日常生产入口）
+scripts/serve_existing_game.py  附加已运行游戏 MCP 启动器（推荐日常入口）
+scripts/serve_campaign.py   持久战役 MCP 启动器（保留）
 src/stellaris_autopilot/
+  attached_process.py / attached_runtime.py  只读附加、会话初始化、检查点与断开
   direct.py / direct_mcp.py     精确 MCP 工具与本地授权
   campaign.py / campaign_runtime.py  不可变检查点、会话、保存与重载门禁
   native.py / native_*.js       固定构建的原生科研、建设、舰队命令适配

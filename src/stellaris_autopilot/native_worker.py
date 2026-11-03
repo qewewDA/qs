@@ -36,6 +36,8 @@ try:
                 result = script.exports_sync.result(*message["arguments"])
             elif method == "cancel":
                 result = script.exports_sync.cancel(*message["arguments"])
+            elif method == "bind_window":
+                result = script.exports_sync.bindwindow(*message["arguments"])
             elif method == "close":
                 print(json.dumps({"request_id": message["request_id"], "result": {"closed": True}}), flush=True)
                 break
@@ -43,6 +45,7 @@ try:
                 raise ValueError("Unsupported worker method")
             print(json.dumps({"request_id": message["request_id"], "result": result}), flush=True)
         except Exception as exc:
+            print(str(exc), file=sys.stderr, flush=True)
             print(json.dumps({"request_id": message.get("request_id"), "error": str(exc)}), flush=True)
 finally:
     if script is not None:

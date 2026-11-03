@@ -56,6 +56,7 @@ DIRECT_CONFIG_SCHEMA = {
         "campaign_id": {"type": "string", "minLength": 1, "maxLength": 512},
         "verified_game_version": {"type": "string", "minLength": 1, "maxLength": 256},
         "session_token": {"type": "string", "pattern": r"^[0-9a-f]{32}$"},
+        "event_namespace": {"type": "string", "pattern": r"^[a-z][a-z0-9_]{1,79}$"},
         "allowed_actions": {"type": "array", "uniqueItems": True,
                             "items": {"enum": [PROBE_ACTION, HOLD_ACTION]}},
         "allowed_orders": {"type": "array", "uniqueItems": True,
@@ -87,6 +88,7 @@ class DirectConfig:
     max_snapshot_age_seconds: float = 180
     verification_timeout_seconds: float = 60
     poll_seconds: float = 1
+    event_namespace: str = "qs_direct_targets"
 
     @property
     def inbox_path(self) -> Path:
@@ -120,6 +122,9 @@ def validate_direct_config(config: DirectConfig) -> None:
     if config.verified_game_version.strip().casefold() in {"unknown", "none"}:
         raise ValueError("verified_game_version must identify a known game version")
     _token(config.session_token, "session_token")
+    if (not isinstance(config.event_namespace, str)
+            or not re.fullmatch(r"[a-z][a-z0-9_]{1,79}", config.event_namespace, re.ASCII)):
+        raise ValueError("event_namespace must be a bounded script namespace")
     actions = config.allowed_actions
     if (not isinstance(actions, (tuple, list))
             or any(not isinstance(action, str) or action not in _ACTIONS for action in actions)

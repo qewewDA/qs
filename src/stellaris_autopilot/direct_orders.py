@@ -133,21 +133,23 @@ def _move_target(state: dict, order: Order) -> dict:
     return target
 
 
-def render_target_events(session: str) -> str:
+def render_target_events(session: str, *, namespace: str = "qs_direct_targets") -> str:
     """Render the fixed typed-binding Mod events for one unpredictable session."""
     _token(session, "session token")
+    if not isinstance(namespace, str) or not re.fullmatch(r"[a-z][a-z0-9_]{1,79}", namespace, re.ASCII):
+        raise ValueError("Invalid fixed event namespace")
     guard = f"has_country_flag = qs_direct_session_{session} is_ai = no is_multiplayer = no is_ironman = no"
-    result = "namespace = qs_direct_targets\n\n"
+    result = f"namespace = {namespace}\n\n"
     for event_type, number, target in (("planet_event", 1, "planet"), ("fleet_event", 2, "fleet")):
         result += (
-            f"{event_type} = {{\n id = qs_direct_targets.{number}\n hide_window = yes\n"
+            f"{event_type} = {{\n id = {namespace}.{number}\n hide_window = yes\n"
             " is_triggered_only = yes\n immediate = {\n"
             f"  if = {{ limit = {{ owner = {{ {guard} }} }}\n"
             f"   save_global_event_target_as = qs_direct_{target}_{session}\n"
             "  }\n }\n}\n\n"
         )
     result += (
-        "country_event = {\n id = qs_direct_targets.3\n hide_window = yes\n is_triggered_only = yes\n"
+        f"country_event = {{\n id = {namespace}.3\n hide_window = yes\n is_triggered_only = yes\n"
         f" immediate = {{ if = {{ limit = {{ {guard} }}\n"
         f"  set_country_flag = qs_direct_targets_{session}\n"
         " } }\n}\n"
@@ -156,7 +158,7 @@ def render_target_events(session: str) -> str:
     # target; the actual fleet action still requires the selected human owner,
     # the session/bootstrap flags and the engine's full pathfinding predicate.
     result += (
-        "\nplanet_event = {\n id = qs_direct_targets.4\n hide_window = yes\n is_triggered_only = yes\n"
+        f"\nplanet_event = {{\n id = {namespace}.4\n hide_window = yes\n is_triggered_only = yes\n"
         f" immediate = {{ if = {{ limit = {{ any_country = {{ {guard} }} }}\n"
         f"  save_global_event_target_as = qs_direct_navigation_{session}\n"
         " } }\n}\n"
@@ -183,7 +185,7 @@ def render_order(config: DirectConfig, order: Order, token: str) -> str:
         f"effect if = {{ limit = {{ exists = event_target:{target} }} clear_global_event_target = {target} }}\n"
         for target in cleanup_targets
     )
-    binding = f"event qs_direct_targets.2 fleet {order.fleet_id}\n"
+    binding = f"event {config.event_namespace}.2 fleet {order.fleet_id}\n"
     fleet_guard = (
         f"event_target:{fleet} = {{ {owner} is_mobile = yes is_in_combat = no "
         "OR = { is_ship_class = shipclass_military is_ship_class = shipclass_science_ship "
@@ -191,12 +193,12 @@ def render_order(config: DirectConfig, order: Order, token: str) -> str:
     )
     target_guard = ""
     if order.kind == "fleet_orbit":
-        binding = f"event qs_direct_targets.1 planet {order.planet_id}\n" + binding
+        binding = f"event {config.event_namespace}.1 planet {order.planet_id}\n" + binding
         target_guard = f"exists = event_target:{planet} event_target:{planet} = {{ {owner} }} "
         fleet_guard += f"solar_system = {{ is_same_value = event_target:{planet}.solar_system }} "
         queue = f"orbit_planet = event_target:{planet} wait = 30"
     elif order.kind == "fleet_move":
-        binding = f"event qs_direct_targets.4 planet {order.planet_id}\n" + binding
+        binding = f"event {config.event_namespace}.4 planet {order.planet_id}\n" + binding
         target_guard = f"exists = event_target:{navigation} "
         fleet_guard += f"can_access_system = event_target:{navigation}.solar_system "
         queue = f"move_to = event_target:{navigation}.solar_system wait = 30"
