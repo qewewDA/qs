@@ -145,7 +145,7 @@ python -m stellaris_autopilot direct-mcp --config C:\path\config.direct.local.js
 
 模型不能选择进程、DLL、函数地址、路径、原始脚本或执行代码。执行器固定对象类型和模板，所有 ID 必须从新状态中核对。
 
-推荐顺序：`request_observation` → 查看 `research_status` / `fleets_by_id` / `planets_by_id` → 指定精确工具参数 → 查看返回的新状态和验证结果。首次读档需要时间，MCP 客户端工具超时建议至少 180 秒。
+按整项任务准备：缺少相关新状态时 `request_observation` 一次，查看所需 `research_status` / `fleets_by_id` / `planets_by_id` 后串行调用精确工具。已有相关观察与暂停证明时不重复准备。成功回执的 `context` 直接复用本次真实 after，附相关目标、队列、资源变化与暂停已知性，不再额外请求完整 dump 证明同一项成功；后端逐项核验保持不变。详细语义见 [task-workflow.md](task-workflow.md)。首次读档需要时间，MCP 客户端工具超时建议至少 180 秒。
 
 ## 状态与操作记录
 

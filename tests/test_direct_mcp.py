@@ -200,15 +200,27 @@ def test_receipt_alone_never_confirms_a_gameplay_order(config_path, monkeypatch)
     publish_receipt(monkeypatch, observer)
     result = direct.DirectConnection(config_path).execute("hold_military_fleets")
     assert result["status"] == "unverified"
+    assert "context" not in result and "dispatch_state" not in result
     assert records(config_path)[0]["status"] == "unverified"
 
 
 def test_hold_verifies_real_fleet_wait_orders(config_path, monkeypatch):
     observer = configure_observer(monkeypatch)
+    observer_read = observer.read
+    reads = []
+
+    def counted_read():
+        reads.append(True)
+        return observer_read()
+
+    monkeypatch.setattr(observer, "read", counted_read)
     publish_receipt(monkeypatch, observer, orders=True)
     result = direct.DirectConnection(config_path).execute("hold_military_fleets")
     assert result["status"] == "action_verified"
     assert result["action"] == "hold_military_fleets"
+    assert result["dispatch_state"] == "verified" and result["goal_state"] == "pending"
+    assert result["context"]["snapshot"] == result["snapshot"] == "after"
+    assert len(reads) == 2  # Existing before/after proof, no receipt-only reread.
     assert records(config_path)[0]["status"] == "verified"
 
 
@@ -604,6 +616,14 @@ def test_ship_mcp_requires_paid_postconditions_and_correlated_native_dispatch(co
     expected = "command_verified" if outcome == "paid" else "blocked" if outcome == "rejected" else "unverified"
     assert result["status"] == expected
     assert len(backend.submissions) == 1
+    if outcome == "paid":
+        assert result["dispatch_state"] == "verified" and result["goal_state"] == "pending"
+        assert result["context"]["snapshot"] == result["snapshot"] == "ship_after"
+        assert result["context"]["target_refs"]["queue_id"] == "8"
+        assert result["context"]["queue"]["id"] == "8"
+        assert len(backend.queries) == 0
+    else:
+        assert "context" not in result and "dispatch_state" not in result
     record = records(config_path)[0]
     assert record["status"] == ("verified" if outcome == "paid" else "reconciled" if outcome == "rejected" else "unverified")
     recorded = json.loads(record["before_json"])["_native_operation"]
