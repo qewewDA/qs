@@ -17,9 +17,11 @@ import re
 import subprocess
 import sys
 import threading
+import time
 
 from .owned_process import OwnedGameProcess
 from .attached_process import AttachedGameProcess
+from .connection_cancel import check_cancelled
 
 
 PINNED_EXE_SHA256 = "400df27c82ddc845aa9dce79bd468d81f18f060d299cd263e3afa93aef4f7a83"
@@ -297,7 +299,11 @@ class NativeResearchBridge:
     """A private, serialized worker for an owned or independently verified attached game."""
 
     def __init__(self, process: subprocess.Popen | OwnedGameProcess | AttachedGameProcess,
-                 executable: Path, state_dir: Path):
+                 executable: Path, state_dir: Path, *, initialization_deadline: float | None = None,
+                 cancel_event: threading.Event | None = None):
+        self._deadline = initialization_deadline
+        self._cancel_event = cancel_event
+        self._remaining_timeout()
         if (sys.platform != "win32"
                 or not isinstance(process, (subprocess.Popen, OwnedGameProcess, AttachedGameProcess))
                 or process.poll() is not None):
@@ -316,11 +322,16 @@ class NativeResearchBridge:
         state_dir.mkdir(parents=True, exist_ok=True)
         self.event_log = state_dir / "native-events.jsonl"
         self.error_log = (state_dir / "native-worker-stderr.log").open("w", encoding="utf-8")
-        self.process = subprocess.Popen(
-            [sys.executable, "-u", "-m", "stellaris_autopilot.native_worker", str(process.pid), str(executable)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.error_log,
-            text=True, encoding="utf-8", creationflags=subprocess.CREATE_NO_WINDOW,
-        )
+        try:
+            self._remaining_timeout()
+            self.process = subprocess.Popen(
+                [sys.executable, "-u", "-m", "stellaris_autopilot.native_worker", str(process.pid), str(executable)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.error_log,
+                text=True, encoding="utf-8", creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except BaseException:
+            self.error_log.close()
+            raise
         def pump():
             for line in self.process.stdout:
                 self.messages.put(line)
@@ -334,11 +345,42 @@ class NativeResearchBridge:
             self.close()
             raise
 
+    def _remaining_timeout(self) -> float:
+        check_cancelled(getattr(self, "_cancel_event", None), "native_rpc")
+        deadline = getattr(self, "_deadline", None)
+        seconds = 25 if deadline is None else min(25, deadline - time.monotonic())
+        if seconds <= 0:
+            raise ValueError("Connection deadline exceeded before native RPC; no further request was sent")
+        return seconds
+
+    def finish_initialization(self) -> None:
+        """Clear the connection budget only after the verified runtime is ready."""
+        self._remaining_timeout()
+        self._deadline = None
+        self._cancel_event = None
+
     def _read(self) -> dict:
         try:
-            message = self.messages.get(timeout=25)
+            timeout = self._remaining_timeout()
+            event = getattr(self, "_cancel_event", None)
+            if event is None:
+                message = self.messages.get(timeout=timeout)
+            else:
+                until = time.monotonic() + timeout
+                while True:
+                    self._remaining_timeout()
+                    remaining = until - time.monotonic()
+                    if remaining <= 0:
+                        raise queue.Empty
+                    try:
+                        message = self.messages.get(timeout=min(remaining, 0.1))
+                        break
+                    except queue.Empty:
+                        if time.monotonic() >= until:
+                            raise
         except queue.Empty:
             raise ValueError("Native worker timed out; the operation may be unresolved") from None
+        check_cancelled(event, "native_rpc")
         if message is None:
             raise ValueError("Native worker exited; inspect its local log")
         reply = json.loads(message)
@@ -353,6 +395,7 @@ class NativeResearchBridge:
             self.request_id += 1
             expected = self.request_id
             try:
+                self._remaining_timeout()
                 self.process.stdin.write(json.dumps({"request_id": expected, "method": method, "arguments": arguments}) + "\n")
                 self.process.stdin.flush()
                 reply = self._read()

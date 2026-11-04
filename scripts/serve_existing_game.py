@@ -9,9 +9,8 @@ import sys
 from mcp.types import ToolAnnotations
 from pydantic import StrictBool
 
-from stellaris_autopilot.attached_runtime import connect_existing, resolve_user_dir
 from stellaris_autopilot.direct_mcp import build_direct_server
-from stellaris_autopilot.knowledge import GameKnowledge
+from stellaris_autopilot.existing_session import ExistingGameSession
 
 
 def main():
@@ -22,38 +21,50 @@ def main():
     parser.add_argument("--pid", type=int, help="Optional local PID selection when multiple games exist")
     parser.add_argument("--extended", action="store_true")
     parser.add_argument("--knowledge-bundle", type=Path)
+    parser.add_argument("--connect-timeout", type=float, default=45,
+                        help="Initialization budget in seconds; file work and cleanup can take extra time")
     args = parser.parse_args()
-    knowledge = GameKnowledge.load(args.knowledge_bundle) if args.knowledge_bundle is not None else None
-    runtime = None
+    session = ExistingGameSession(args.game_dir, args.state_dir, user_dir=args.user_dir,
+                                  pid=args.pid, extended=args.extended, knowledge_bundle=args.knowledge_bundle,
+                                  timeout_seconds=args.connect_timeout)
     try:
-        runtime = connect_existing(args.game_dir / "stellaris.exe", args.state_dir,
-                                   user_dir=resolve_user_dir(args.game_dir, args.user_dir),
-                                   pid=args.pid, extended=args.extended)
-        server = build_direct_server(runtime.config_path, native_bridge=runtime.native,
-                                     game_knowledge=knowledge, connection=runtime.connection,
+        server = build_direct_server(args.state_dir / "not-connected.json", connection=session,
+                                     context_provider=session.context,
+                                     knowledge_provider=session.knowledge if args.knowledge_bundle is not None else None,
                                      existing_game=True)
         readonly = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True)
         writing = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False)
 
         @server.tool(annotations=readonly)
         def attached_status() -> dict:
-            """Read the existing-game attachment and checkpoint state. This session never owns the game."""
-            return runtime.status()
+            """Read connection progress; an idle connection also checks its held process handles.
+
+            No process discovery, attachment or save parsing. A stale connection requires an explicit retry.
+            """
+            return session.status()
+
+        @server.tool(annotations=writing)
+        async def connect_game(retry: StrictBool = False) -> dict:
+            """Connect once to the manually opened paused save. Report failures; never retry automatically.
+
+            MCP discovery is already ready before this call. Success includes a verified compact initial
+            observation. Use retry=true only after the user corrects a previously reported failure.
+            """
+            return await session.connect_game_async(retry=retry)
 
         @server.tool(annotations=writing)
         async def checkpoint_game() -> dict:
             """Pause, verify and write a new save under save games/qs_mcp; keep the game running."""
-            return await asyncio.to_thread(runtime.checkpoint_game)
+            return await asyncio.to_thread(session.checkpoint_game)
 
         @server.tool(annotations=writing)
         async def disconnect_game(save: StrictBool = True) -> dict:
             """Optionally checkpoint, then detach MCP. The manually opened game remains running."""
-            return await asyncio.to_thread(runtime.disconnect_game, save=save)
+            return await asyncio.to_thread(session.disconnect_game, save=save)
 
         server.run(transport="stdio")
     finally:
-        if runtime is not None:
-            runtime.close()
+        session.close()
 
 
 if __name__ == "__main__":

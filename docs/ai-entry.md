@@ -4,7 +4,9 @@
 
 使用方式是：在**同一个Agent对话**里先把提示词发一次；之后直接说中文任务，不需要重复选任务卡或复制模板。**新对话没有保留上下文，需要重新发一次。**
 
-真正的游戏控制由 MCP 客户端完成：按本机配置接入服务后，Agent 才能调用游戏工具。推荐使用 [附加已运行模式](attach-existing.md)：你先正常打开群星、读入存档并暂停，MCP 连接当前局，断开后游戏保持运行。入口生成器会按配置中的 `serve_existing_game.py` 导出这套提示词；持久战役启动器的配置则保留自动启动与检查点接续流程。
+真正的游戏控制由 MCP 客户端完成：按本机配置接入服务后，Agent 才能调用游戏工具。推荐使用 [附加已运行模式](attach-existing.md)：你先正常打开群星、读入存档并暂停；MCP 服务启动后立即握手并暴露工具，不因没有游戏而阻塞，随后 Agent 才调用 `connect_game()` 连接当前局一次。连接成功返回精简初始快照，断开后游戏保持运行。入口生成器会按配置中的 `serve_existing_game.py` 导出这套提示词；持久战役启动器的配置则保留自动启动与检查点接续流程。
+
+附加模式的重连语义以 [附加已运行模式](attach-existing.md) 为准：未连接时 `attached_status()` 不访问游戏，已连接时只做快速存活检查；游戏退出后状态变为 `connected=false`、`state=stale`，用户重开并暂停后用 `connect_game(retry=true)` 重连；用户已切换存档时先 `disconnect_game(save=false)` 再连接，不需要重启 MCP 服务。MCP 客户端取消连接时状态可显示 `state=cancelling`，清理完成后需重新调用 `connect_game(retry=true)`，不会留下后台连接。
 
 ## 生成入口
 
@@ -69,9 +71,11 @@
 
 ## 与 MCP 原生 prompt 的关系
 
-配套的 MCP 服务通过 assistant_prompts.py 暴露**唯一**的 stellaris_agent 提示词（标题“一次性接入提示词”）。它的内容与页面导出的接入提示词一致：包含完整持续操作约定，要求先检查连接和状态，之后接受同一对话里的自然中文命令；内阁、传统、飞升由用户选择，AI 只可检索资料理解打法。
+配套的 MCP 服务通过 assistant_prompts.py 暴露**唯一**的 stellaris_agent 提示词（标题“一次性接入提示词”）。它的内容与页面导出的接入提示词一致：包含完整持续操作约定，要求先调用 `attached_status()`、再调用 `connect_game()` 一次，成功返回值已含精简初始快照；失败时报告 phase/reason 后停止，用户纠正后才用 `connect_game(retry=true)`。之后接受同一对话里的自然中文命令；内阁、传统、飞升由用户选择，AI 只可检索资料理解打法。
 
-MCP 原生 prompt 只是服务端提供的用户消息模板：客户端连接后出现在提示词列表，选中后仍要由模型调用真实工具；它不会自动读档、下单或保存。客户端不支持 prompts/list 时，就使用导出的 HTML 复制入口。prompt 注册后需要重启服务并重新连接客户端才能看到。
+MCP 原生 prompt 只是服务端提供的用户消息模板：客户端连接后出现在提示词列表，选中后仍要由模型调用真实工具；它不会自动读档、下单或保存。客户端不支持 prompts/list 时，就使用导出的 HTML 复制入口。prompt 注册后需要重启服务并重新连接客户端才能看到；这只是 prompt 注册刷新，游戏换档或退出后的重连不需要重启 MCP 服务。
+
+附加模式的 `state=stale`、连接取消、`connect_game(retry=true)` 和换档前 `disconnect_game(save=false)` 细节见 [attach-existing.md](attach-existing.md)；这些细节不要求重启 MCP 宿主。
 
 ## 主程序接口
 
@@ -79,12 +83,12 @@ MCP 原生 prompt 只是服务端提供的用户消息模板：客户端连接�
 
     render_prompt(*, playstyle="", campaign=True, existing_game=False, server_name="当前群星 MCP 服务", connection_note="") -> str
 
-它只返回文字，不读快照、不下单；当前没有 playbooks 函数。existing_game=True 时使用附加模式的 attached_status / checkpoint_game / disconnect_game，并说明断开后游戏保持运行；否则 campaign=True 时使用持久战役的 checkpoint_campaign / save_and_close，campaign=False 时说明普通直连的保存能力边界。
+它只返回文字，不读快照、不下单；当前没有 playbooks 函数。existing_game=True 时使用附加模式的 attached_status → connect_game 一次性连接、checkpoint_game 和 disconnect_game，并说明连接成功已有精简初始快照、失败报告阶段后停止、用户纠正后才 retry=true、断开后游戏保持运行；否则 campaign=True 时使用持久战役的 checkpoint_campaign / save_and_close，campaign=False 时说明普通直连的保存能力边界。
 
 ## 不在本页范围
 
 - 不安装依赖、不启动服务、不启动游戏、不注册 MCP。
-- 页面负责整理提示词和配置。连接当前手动打开的游戏由 `serve_existing_game.py` 完成；自动启动模式由 `serve_campaign.py` 完成。
+- 页面负责整理提示词和配置。MCP 服务由 `serve_existing_game.py` 启动后先完成握手；连接当前手动打开的游戏由 Agent 调用 `connect_game()` 完成。自动启动模式由 `serve_campaign.py` 完成。
 - 不宣称全局已安装、已游戏实测或所有 DLC/版本可用；实际使用仍受 Cygnus v4.5.2、国家 0、单人非铁人、EXE 哈希和本地授权的限制。
 - 不替代 docs/campaign.md 和 docs/direct-control.md 中的检查点、暂停、后置条件和保存说明。
 

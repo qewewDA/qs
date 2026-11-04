@@ -25,6 +25,7 @@ from stellaris_autopilot.direct_orders import render_target_events
 from stellaris_autopilot.knowledge import GameKnowledge
 from stellaris_autopilot.native import NativeResearchBridge, PINNED_EXE_SHA256
 from stellaris_autopilot.owned_process import OwnedGameProcess, check_steam_session, launch_game
+from stellaris_autopilot.profile_settings import seed_profile_settings
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -60,11 +61,7 @@ def prepare_profile(store: CampaignStore, session: dict, *, allowed_native_actio
         "title": "save games/qs_campaign/" + checkpoint["id"],
         "desc": "QS persistent campaign", "date": checkpoint["date"],
     }))
-    put(userdir / "settings.txt", '''language="l_simp_chinese"
-graphics={size={x=1024 y=768} fullScreen=no borderless=no refreshRate=60 refreshCap=30
-gui_scale=1.0 renderer=1 multi_sampling=0 shadowSize=1024 vsync=no}
-autosave=0 autosave_tocloud=no manualsave_tocloud=no tutorial=0 gfx_quality=0
-''')
+    seed_profile_settings(userdir)
     descriptor = 'name="QS persistent command bridge"\nversion="0.2"\nsupported_version="4.5.*"\n'
     mod = userdir / "mod" / "qs_campaign_bridge"
     put(mod / "descriptor.mod", descriptor)

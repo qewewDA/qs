@@ -48,8 +48,13 @@ def render_prompt(*, playstyle: str = "", campaign: bool = True, existing_game: 
     )
     if existing_game:
         startup = (
-            "先调用 attached_status()、status()、list_actions() 和 request_observation()，"
-            "核对当前存档的帝国、日期、授权与未决命令。"
+            "先调用 attached_status() 一次；未连接时调用 connect_game() 一次。"
+            "连接成功的返回值已包含核验过的初始状态、日期和授权摘要，不要为了接入再重复请求完整存档。"
+            "已经连接时再按任务需要调用 status / list_actions / request_observation。"
+            "连接返回 blocked、busy 或失败时，简短报告 phase、reason 和用户需要完成的一步，然后停止接入尝试；"
+            "不要自动循环重试。用户纠正原因并要求再连后才用 connect_game(retry=true)。"
+            "状态为 stale 表示游戏已退出或旧通道已失效；用户重新读档暂停后用 connect_game(retry=true) 核对新局。"
+            "用户在同一进程内切换存档时先 disconnect_game(save=false)，再连接当前局。"
         )
         saving = (
             "我说“保存”或“中途保存”时调用 checkpoint_game，核对 checkpoint_saved，"
@@ -64,8 +69,10 @@ def render_prompt(*, playstyle: str = "", campaign: bool = True, existing_game: 
         "请作为我的群星指挥 Agent。把下面内容作为当前对话后续所有群星指令的持续约定；"
         "我只发这一次，之后直接用中文告诉你要做什么。后续我修正打法或范围时以我的最新指令为准。",
         f"【一次接入】\n使用 {server_name}。当前 AI 客户端须实际接入本地 stdio MCP。"
-        "工具已可见就直接使用；工具不可见时，按我提供的本机配置，通过客户端支持的方式完成接入。"
-        "需要客户端重连或设置时只说明真实缺口，不声称已经连接。提示词本身不能建立连接。"
+        "工具已可见就直接使用；工具不可见时最多读取所给的连接配置一次，使用客户端已有的原生接入能力。"
+        "没有这种能力或接入后仍无工具，就立即说明需要配置或重连客户端，停止排查并等我处理。"
+        "接入阶段不读客户端或项目源码、不编写 stdio 探针、不自行反复启动服务或修改客户端配置。"
+        "提示词本身不能建立连接，也不能把 Python 进程存在当作连接成功。"
         + connection_text,
         connection_note.strip(),
         "【先读现状】\n" + startup + "首次接入完成后简要报告帝国、日期和可用操作，保持暂停，等我的下一条中文命令。",

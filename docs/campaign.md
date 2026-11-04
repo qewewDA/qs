@@ -110,6 +110,15 @@ campaign/
     save games/qs_campaign/<检查点ID>.sav
 ```
 
+`userdir/` 下的 `settings.txt` 和 `pdx_settings.txt` 是用户配置副本，不是启动器模板。`prepare_profile()` 调用 `seed_profile_settings()`：
+
+- 已有文件保持原字节，不覆盖；
+- 缺失文件只从 Windows Documents 的 `Paradox Interactive/Stellaris` 用户目录复制同名文件；
+- 源文件不存在时不创建，交给游戏生成默认配置；
+- Documents 路径通过 Windows shell known folder（`SHGetFolderPathW`）获取；非 Windows 或无法获取时跳过复制。
+
+因此启动器不再写入测试用 1024x768/60/30 图形模板；重新连接不会改写用户的分辨率、全屏/无边框、`refreshRate`/`refreshCap`、vsync 等显示偏好，启动失败也不会再次覆盖已有设置。
+
 `manifest.json` 的 `campaign_id`、`country_id`、`game_version` 必须与每个检查点匹配。首次导入和后续检查点均要求选定国家是存档中唯一可识别的人类玩家；未知游戏模式依赖用户已提供的单人、非铁人确认。
 
 模型不能选择检查点路径、控制台命令或脚本；路径只通过本地启动参数配置，MCP 保存工具没有路径参数。

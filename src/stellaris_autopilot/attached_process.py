@@ -9,8 +9,10 @@ import re
 import subprocess
 import sys
 import threading
+import time
 
 from .owned_process import OwnedProcessError, _Kernel32, _check_executable, _same_path
+from .connection_cancel import check_cancelled
 
 
 _ATTACH_KEY = object()
@@ -29,13 +31,13 @@ $items = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='stellaris.exe
 """
 
 
-def _query_candidates(executable: Path) -> list[dict]:
+def _query_candidates(executable: Path, *, timeout_seconds: float = 30) -> list[dict]:
     powershell = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
     try:
         result = subprocess.run(
             [str(powershell), "-NoProfile", "-NonInteractive", "-EncodedCommand",
              base64.b64encode(_QUERY.encode("utf-16-le")).decode("ascii")],
-            capture_output=True, text=True, encoding="utf-8", timeout=30,
+            capture_output=True, text=True, encoding="utf-8", timeout=timeout_seconds,
             creationflags=subprocess.CREATE_NO_WINDOW, check=True)
         items = json.loads(result.stdout)
         if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
@@ -93,16 +95,28 @@ class AttachedGameProcess:
                 pass
 
 
-def attach_game(executable: Path, *, pid: int | None = None) -> AttachedGameProcess:
+def attach_game(executable: Path, *, pid: int | None = None,
+                deadline: float | None = None, cancel_event: threading.Event | None = None) -> AttachedGameProcess:
     if sys.platform != "win32":
         raise OwnedProcessError("Existing game attachment requires Windows")
     if pid is not None and (type(pid) is not int or not 0 < pid < 2**32):
         raise ValueError("PID must be a positive Windows process identifier")
+
+    def remaining() -> float:
+        check_cancelled(cancel_event, "verify_running_process")
+        seconds = 30 if deadline is None else min(30, deadline - time.monotonic())
+        if seconds <= 0:
+            raise OwnedProcessError("Connection deadline exceeded while checking the game process")
+        return seconds
+
+    remaining()
     executable = Path(executable).resolve(strict=True)
     if executable.name.lower() != "stellaris.exe" or not executable.is_file():
         raise ValueError("Select the exact Stellaris executable")
     _check_executable(executable)
-    records = _query_candidates(executable)
+    options = {"timeout_seconds": remaining()} if deadline is not None else {}
+    records = _query_candidates(executable, **options)
+    remaining()
     if pid is not None:
         records = [item for item in records if type(item.get("pid")) is int and item["pid"] == pid]
     if len(records) != 1:
@@ -125,6 +139,7 @@ def attach_game(executable: Path, *, pid: int | None = None) -> AttachedGameProc
                 or kernel.wait(handle, 0) is not None):
             raise OwnedProcessError("Existing process handle identity does not match")
         _check_executable(executable)
+        remaining()
         result = AttachedGameProcess(_ATTACH_KEY, pid=selected_pid, handle=handle, kernel=kernel,
                                      executable=executable, created=created)
         handle = None

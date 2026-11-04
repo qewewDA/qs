@@ -10,6 +10,7 @@ import uuid
 
 from .attached_process import attach_game
 from .campaign import CampaignError, _atomic, package_dump
+from .connection_cancel import check_cancelled
 from .direct import (NATIVE_ACTIONS, ORDER_KINDS, OWNERSHIP_HEADER, DirectConfig,
                      disarm_inbox, load_direct_config, ownership_header)
 from .direct_mcp import DirectConnection, _controller_lock, validate_connection
@@ -42,7 +43,8 @@ def resolve_user_dir(game_dir: Path, explicit: Path | None = None) -> Path:
 
 
 class AttachedRuntime:
-    def __init__(self, process, native, user_dir: Path, state_dir: Path, token: str, *, extended=False):
+    def __init__(self, process, native, user_dir: Path, state_dir: Path, token: str, *, extended=False,
+                 deadline=None, progress=None, cancel_event=None):
         self.process, self.native = process, native
         self.user_dir, self.state_dir, self.token = Path(user_dir), Path(state_dir), token
         self.config_path = self.state_dir / "direct.json"
@@ -56,10 +58,25 @@ class AttachedRuntime:
         self._inbox_owned = False
         self._events = None
         self._extended = extended
+        self._deadline, self._progress = deadline, progress
+        self._cancel_event = cancel_event
+        self.initial_summary = None
+
+    def _phase(self, phase: str):
+        check_cancelled(self._cancel_event, phase)
+        if self._deadline is not None and time.monotonic() >= self._deadline:
+            raise CampaignError("Connection deadline exceeded at " + phase)
+        if self._progress is not None:
+            self._progress(phase)
+
+    def _until(self, seconds: float) -> float:
+        deadline = time.monotonic() + seconds
+        return min(deadline, self._deadline) if self._deadline is not None else deadline
 
     def _wait(self, token: str, kind: str, expected: str, *, timeout=120) -> dict:
-        deadline = time.monotonic() + timeout
+        deadline = self._until(timeout)
         while time.monotonic() < deadline:
+            check_cancelled(self._cancel_event, "wait_native_operation")
             if self.process.poll() is not None:
                 raise CampaignError("The attached game exited")
             result = self.native.result(token)
@@ -76,15 +93,20 @@ class AttachedRuntime:
         token, started = uuid.uuid4().hex, time.time()
         self.native.request_dump(token)
         result = self._wait(token, "request_observation", "dump_requested")
-        deadline = time.monotonic() + 120
+        deadline = self._until(120)
         observer = DirectObserver(self.user_dir / "save games" / "dump_qs_direct.sav.txt", "0")
         while time.monotonic() < deadline:
+            check_cancelled(self._cancel_event, "read_current_save")
+            if self.process.poll() is not None:
+                raise CampaignError("The attached game exited")
             try:
                 observed = observer.read()
-                if observed.modified_at >= started:
-                    return observed, result
             except ValueError:
                 pass
+            else:
+                check_cancelled(self._cancel_event, "read_current_save")
+                if observed.modified_at >= started:
+                    return observed, result
             time.sleep(0.2)
         raise CampaignError("No fresh matching dump in the selected user directory")
 
@@ -93,10 +115,13 @@ class AttachedRuntime:
         self._inbox_owned = True
 
     def initialize(self):
+        self._phase("acquire_controller")
         self._lock_descriptor = os.open(self._lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         os.write(self._lock_descriptor, json.dumps({"controller_pid": os.getpid(), "session": self.token}).encode())
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        self._phase("bind_game_window")
         self.native.bind_existing_window(uuid.uuid4().hex)
+        self._phase("read_current_save")
         observed, receipt = self._fresh()
         meta = observed.state.get("metadata", {})
         if (observed.state.get("country_id") != "0" or meta.get("player_country_ids") != ["0"]
@@ -106,8 +131,10 @@ class AttachedRuntime:
         if receipt.get("runtime", {}).get("paused") is not True:
             raise CampaignError("Pause the loaded game before connecting")
         # Preserve the live state before loading any session-specific bridge definitions.
+        self._phase("backup_current_save")
         package_dump(self.user_dir / "save games" / "dump_qs_direct.sav.txt",
                      self.state_dir / "before-attachment.sav", "0", expected_digest=observed.digest)
+        self._phase("prepare_session")
         config = DirectConfig(
             user_dir=self.user_dir, state_dir=self.state_dir, country_id="0", campaign_id=meta["campaign_id"],
             verified_game_version=meta["game_version"], session_token=self.token,
@@ -128,6 +155,7 @@ class AttachedRuntime:
                 raise CampaignError("The existing command inbox is active or not owned by this project")
             self._old_inbox = old
         with _controller_lock(config):
+            self._phase("load_session_events")
             events = render_target_events(self.token, namespace=config.event_namespace)
             events += (
                 f"\ncountry_event = {{ id = {config.event_namespace}.99 hide_window = yes is_triggered_only = yes\n"
@@ -139,10 +167,12 @@ class AttachedRuntime:
             self._events = (path, events.encode("utf-8"))
             self.native.load_attached_events(self.token)
             self._wait(self.token, "load_attached_events", "events_load_returned")
+            self._phase("bind_current_session")
             self._write_inbox(config, f"event {config.event_namespace}.99 0\nevent {config.event_namespace}.3 0\n")
             token = uuid.uuid4().hex
             self.native.run_inbox(token)
             self._wait(token, "run_inbox", "inbox_executed")
+            self._phase("verify_current_session")
             observed, receipt = self._fresh()
             validate_connection(config, observed)
             if (f"qs_direct_targets_{self.token}" not in observed.state["direct_bridge"]["target_flags"]
@@ -150,10 +180,23 @@ class AttachedRuntime:
                 raise CampaignError("Runtime event targets or pause were not verified")
             disarm_inbox(config)
         self.connection = DirectConnection(self.config_path, native_bridge=self.native)
+        self.initial_summary = {
+            "country_id": observed.state["country_id"], "date": observed.state["date"],
+            "campaign_id": config.campaign_id, "game_version": config.verified_game_version,
+            "snapshot": observed.digest, "paused": True,
+            "planet_count": len(observed.state.get("planets_by_id", {})),
+            "fleet_count": len(observed.state.get("fleets_by_id", {})),
+            "allowed_orders": list(config.allowed_orders),
+            "allowed_native_actions": list(config.allowed_native_actions),
+        }
         _atomic(self.state_dir / "attached.json", json.dumps({
             "session": self.token, "pid": self.process.pid, "campaign_id": config.campaign_id,
             "date": observed.state["date"], "game_started": False, "connection_mode": "existing_game",
             "engine_single_player_guard_verified": True}, indent=2).encode())
+        self._phase("connected")
+        if self._deadline is not None or self._cancel_event is not None:
+            self.native.finish_initialization()
+        self._deadline, self._progress, self._cancel_event = None, None, None
         return self
 
     def status(self) -> dict:
@@ -229,18 +272,45 @@ class AttachedRuntime:
 
 
 def connect_existing(executable: Path, state_root: Path, *, user_dir: Path, pid: int | None = None,
-                     extended: bool = False) -> AttachedRuntime:
+                     extended: bool = False, timeout_seconds: float | None = None,
+                     progress=None, cancel_event: threading.Event | None = None) -> AttachedRuntime:
+    if timeout_seconds is not None and (type(timeout_seconds) not in (int, float)
+                                       or not 5 <= timeout_seconds <= 120):
+        raise ValueError("Connection timeout must be between 5 and 120 seconds")
+    deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
+
+    def phase(name):
+        check_cancelled(cancel_event, name)
+        if deadline is not None and time.monotonic() >= deadline:
+            raise CampaignError("Connection deadline exceeded at " + name)
+        if progress is not None:
+            progress(name)
+
+    phase("check_unresolved_operations")
     state_root = Path(state_root).resolve()
     for path in state_root.glob("sessions/*/journal.sqlite"):
         if _PreviewJournal(path).unresolved():
             raise CampaignError("An earlier attached operation is unresolved; inspect it before reconnecting")
-    process = attach_game(executable, pid=pid)
+    phase("verify_running_process")
+    process_options = {"deadline": deadline} if deadline is not None else {}
+    if cancel_event is not None:
+        process_options["cancel_event"] = cancel_event
+    process = attach_game(executable, pid=pid, **process_options)
     native = runtime = None
     try:
         token = uuid.uuid4().hex
         state_dir = state_root / "sessions" / token
-        native = NativeResearchBridge(process, executable, state_dir)
-        runtime = AttachedRuntime(process, native, user_dir, state_dir, token, extended=extended)
+        phase("start_native_worker")
+        native_options = {"initialization_deadline": deadline} if deadline is not None else {}
+        if cancel_event is not None:
+            native_options["cancel_event"] = cancel_event
+        native = NativeResearchBridge(process, executable, state_dir, **native_options)
+        options = {"extended": extended}
+        if deadline is not None or progress is not None:
+            options.update(deadline=deadline, progress=progress)
+        if cancel_event is not None:
+            options["cancel_event"] = cancel_event
+        runtime = AttachedRuntime(process, native, user_dir, state_dir, token, **options)
         return runtime.initialize()
     except BaseException:
         if runtime is not None:
