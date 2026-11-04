@@ -17,6 +17,62 @@ _IMMEDIATE = frozenset({
 })
 
 
+def current_plan_context(observation: Observation, steps: list[dict]) -> dict:
+    """Return the already-read current targets after a stale guard; this is not a write receipt."""
+    state = observation.state
+    targets, queues = {}, set()
+    shipbuilding = state.get("shipbuilding")
+    selected_ships = {}
+    if isinstance(shipbuilding, dict):
+        selected_ships = {key: copy.deepcopy(shipbuilding[key]) for key in
+                          ("known", "designs_known", "shipyards_known", "species_known") if key in shipbuilding}
+    research = state.get("research_status")
+    selected_research = {}
+    for step in steps:
+        for field, collection in (("planet_id", "planets_by_id"), ("fleet_id", "fleets_by_id")):
+            identifier = step.get(field)
+            index = state.get(collection)
+            value = index.get(identifier) if isinstance(index, dict) and isinstance(identifier, str) else None
+            if value is None and field == "planet_id":
+                space = state.get("space")
+                index = space.get(collection) if isinstance(space, dict) else None
+                value = index.get(identifier) if isinstance(index, dict) else None
+            if isinstance(identifier, str):
+                targets[f"{field}:{identifier}"] = copy.deepcopy(value) if isinstance(value, dict) else None
+            if isinstance(value, dict):
+                if isinstance(value.get("build_queue"), str):
+                    queues.add(value["build_queue"])
+        if isinstance(shipbuilding, dict):
+            for field, collection in (("starbase_id", "shipyards_by_id"), ("design_id", "designs_by_id"),
+                                      ("species_id", "species_by_id")):
+                identifier = step.get(field)
+                index = shipbuilding.get(collection)
+                value = index.get(identifier) if isinstance(index, dict) and isinstance(identifier, str) else None
+                if isinstance(value, dict):
+                    selected_ships.setdefault(collection, {})[identifier] = copy.deepcopy(value)
+                    if field == "starbase_id" and isinstance(value.get("queue_id"), str):
+                        queues.add(value["queue_id"])
+        if step["kind"] == "select_research" and isinstance(research, dict):
+            for key in ("known", "completed_known", "completed_technologies"):
+                if key in research:
+                    selected_research[key] = copy.deepcopy(research[key])
+            areas = research.get("areas")
+            if isinstance(areas, dict) and step["area"] in areas:
+                selected_research.setdefault("areas", {})[step["area"]] = copy.deepcopy(areas[step["area"]])
+    construction = state.get("construction")
+    index = construction.get("queues_by_id") if isinstance(construction, dict) else None
+    return {"snapshot": observation.digest, "date": state.get("date"),
+            "observed_at": observation.modified_at, "country_id": state.get("country_id"),
+            "resources": copy.deepcopy(state.get("resources")),
+            "targets": targets, "shipbuilding": selected_ships or None,
+            "research_status": selected_research or None,
+            "construction_known": construction.get("known") if isinstance(construction, dict) else None,
+            "queues_by_id": {key: copy.deepcopy(index[key]) for key in queues if key in index}
+                if isinstance(index, dict) else None,
+            "missing_fields": copy.deepcopy(state.get("metadata", {}).get("missing_fields")),
+            "proof": "Fresh current observation only; this step was not dispatched. No balance change was inferred."}
+
+
 def _number(value) -> bool:
     return type(value) is int or (type(value) is float and math.isfinite(value))
 

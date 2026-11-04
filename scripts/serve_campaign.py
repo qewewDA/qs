@@ -181,7 +181,8 @@ def main():
                 raise CampaignError("The supplied knowledge bundle does not exist: " + str(bundle))
             knowledge = GameKnowledge.load(bundle) if bundle.is_file() else None
             server = build_direct_server(config_path, native_bridge=native, game_knowledge=knowledge,
-                                         connection=runtime.connection, persistent_campaign=True)
+                                         connection=runtime.connection, persistent_campaign=True,
+                                         task_store_path=store.root / "tasks.sqlite")
             readonly = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True)
             writing = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False)
 

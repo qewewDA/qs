@@ -240,9 +240,21 @@ class ExistingGameSession:
             raise AttributeError(name)
 
         def call(*args, **kwargs):
-            with self._operation:
+            if not self._operation.acquire(blocking=False):
+                return {"status": "busy", "reason": "Another operation owns the connection; this request was not queued"}
+            try:
                 return getattr(self._require().connection, name)(*args, **kwargs)
+            finally:
+                self._operation.release()
         return call
+
+    def run_plan(self, callback) -> dict:
+        if not self._operation.acquire(blocking=False):
+            return {"status": "busy", "reason": "Another operation owns the connection; this plan was not queued"}
+        try:
+            return self._require().connection.run_plan(callback)
+        finally:
+            self._operation.release()
 
     def checkpoint_game(self) -> dict:
         with self._operation:

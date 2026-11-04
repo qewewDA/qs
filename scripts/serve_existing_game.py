@@ -30,6 +30,7 @@ def main():
     try:
         server = build_direct_server(args.state_dir / "not-connected.json", connection=session,
                                      context_provider=session.context,
+                                     task_store_path=args.state_dir / "tasks.sqlite",
                                      knowledge_provider=session.knowledge if args.knowledge_bundle is not None else None,
                                      existing_game=True)
         readonly = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True)

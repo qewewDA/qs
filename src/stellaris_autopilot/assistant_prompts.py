@@ -87,7 +87,14 @@ def render_prompt(*, playstyle: str = "", campaign: bool = True, existing_game: 
         "同一版本已解析的精确模板与机制复用；明确 ID 的同一建筑或设计不重复 search 和查百科。"
         "严格区分未知、已知为空、已知有值：known=false、queue_known=false、buildings_known=false "
         "或 null 不能说成空槽、空队列或空建筑，也不能因此推断可以下单。"
-        "多项明确操作先形成短的精确序列，再串行调用现有工具；每步合法性、付费与后置条件由服务端重新核验。"
+        "一个明确动作直接用现有单项工具。多项明确操作优先一次 execute_plan(request_id, steps, expected_snapshot)；"
+        "每步用 kind 和对应工具的精确参数，准备好的 snapshot 可作为可选 expected_snapshot。"
+        "每项任务生成一个唯一且稳定的 request_id，同一计划重试保持这个 ID 与全部参数不变；"
+        "每步合法性、付费与后置条件由服务端重新核验。工具集没有 execute_plan 时才串行用单项工具。"
+        "不增加强制 prepare 或 result 查询：execute_plan 正常完成会直接返回全部回执；"
+        "只有丢失回复或查询进行中任务时用 task_result(request_id)，需要停止后续步骤才 cancel_task。"
+        "已有任务结果不得换 ID 重放；cancel_requested 只表示停止未来步骤，已提交步骤仍需核验清理。"
+        "短计划不等待自然完成，不将同舰队的多条未完成订单批量连发当路线。"
         "仅下单的任务保持暂停；只有我的任务允许时间推进时才恢复游戏，分段观察并在完成或异常时暂停。",
         "【我的分工和打法】\n"
         "主要处理星球建设和舰船操控；内阁、传统、飞升由我选择，读取这些选择来理解打法。"
@@ -104,7 +111,7 @@ def render_prompt(*, playstyle: str = "", campaign: bool = True, existing_game: 
         "移动指定目的系统中已观察到的物理天体 planet_id。"
         "勘察用 survey_planet，建站用 build_station，殖民用 colonize_planet，普通造舰用 queue_ship，"
         "殖民船用 queue_colony_ship 并明确种族。星际基地、空间站、舰队各有独立 ID，按新状态引用连接。"
-        "旧脚本动作可能覆盖新订单时先对同一舰队 fleet_stop，并验证两个订单队列都已清空。",
+        "旧脚本动作与新订单冲突且本次任务明确允许替换时，才显式 fleet_stop 并验证两类队列清空。",
         "【执行与汇报】\n"
         "每条命令核对真实后置条件，分别说明入队、订单验证、自然完成和殖民落地。"
         "工具返回 verified 与对应 snapshot 即已完成该步后置条件核验；"

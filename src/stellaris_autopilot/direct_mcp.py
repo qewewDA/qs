@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import threading
 import time
 import uuid
 from typing import Callable, Literal
@@ -44,7 +45,9 @@ from .planet_commands import planet_request
 from .fleet_native import fleet_request
 from .extended_native import REQUEST_TYPES, RESOLVED_TYPES, resolve_extended, verify_extended
 from .assistant_prompts import register_prompts
-from .action_context import verified_context
+from .action_context import current_plan_context, verified_context
+from .task_plan import PlanSteps
+from .task_workflow import TaskWorkflow
 
 
 class DirectLockBusy(ValueError):
@@ -93,10 +96,27 @@ def validate_connection(config: DirectConfig, observation: Observation, *, requi
     game_date(state.get("date", ""))
 
 
+_PLAN_LEASE = threading.local()
+
+
 @contextmanager
-def _controller_lock(config: DirectConfig):
+def _controller_lock(config: DirectConfig, *, _plan: bool = False):
     """Serialize writers across state directories; a crashed lock requires local inspection."""
     path = config.user_dir / ".qs_direct_controller.lock"
+    lease = getattr(_PLAN_LEASE, "active", None)
+    if lease is not None:
+        owner_config, descriptor, identity = lease
+        if config != owner_config:
+            raise DirectLockBusy("Plan configuration changed; this lease cannot authorize another connection")
+        try:
+            current = path.stat()
+            held = os.fstat(descriptor)
+        except OSError:
+            raise DirectLockBusy("The plan's writer lease can no longer be verified") from None
+        if (current.st_dev, current.st_ino) != identity or (held.st_dev, held.st_ino) != identity:
+            raise DirectLockBusy("The plan's writer lease changed; inspect before retrying")
+        yield
+        return
     try:
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
@@ -105,8 +125,12 @@ def _controller_lock(config: DirectConfig):
         identity = os.fstat(descriptor)
         os.write(descriptor, json.dumps({"pid": os.getpid(), "token": uuid.uuid4().hex}).encode("ascii"))
         os.fsync(descriptor)
+        if _plan:
+            _PLAN_LEASE.active = (config, descriptor, (identity.st_dev, identity.st_ino))
         yield
     finally:
+        if _plan:
+            _PLAN_LEASE.active = None
         os.close(descriptor)
         try:
             current = path.stat()
@@ -120,7 +144,25 @@ class DirectConnection:
     def __init__(self, config_path: Path, *, native_bridge: NativeResearchBridge | None = None):
         self.config_path = Path(config_path)
         self.native_bridge = native_bridge
+        self._plan_local = threading.local()
         _configuration(self.config_path)
+
+    def run_plan(self, callback) -> dict:
+        """Hold the existing mailbox exclusion across a bounded sequence of old typed APIs."""
+        config = _configuration(self.config_path)
+        acquired = False
+        try:
+            with _controller_lock(config, _plan=True):
+                acquired = True
+                self._plan_local.guard = {"config": config}
+                try:
+                    return callback(self, config)
+                finally:
+                    self._plan_local.guard = None
+        except DirectLockBusy:
+            if acquired:
+                raise
+            return {"status": "busy", "reason": "Another writer owns the game mailbox; no plan was queued"}
 
     @staticmethod
     def _read(observer: DirectObserver) -> Observation:
@@ -261,6 +303,9 @@ class DirectConnection:
         if order is None and selection is None and action_id not in {"probe_connection", "hold_military_fleets"}:
             return {"status": "blocked", "reason": "Unknown fixed direct action"}
         config = _configuration(self.config_path)
+        guard = getattr(self._plan_local, "guard", None)
+        if guard is not None and config != guard["config"]:
+            return {"status": "blocked", "reason": "Configuration changed during the plan; remaining intent was not submitted"}
         allowed = (config.allowed_native_actions if selection is not None
                    else config.allowed_actions if order is None else config.allowed_orders)
         if action_id not in allowed:
@@ -271,6 +316,17 @@ class DirectConnection:
             observer = DirectObserver(config.dump_path, config.country_id)
             before = self._read(observer)
             validate_connection(config, before)
+            if guard is not None:
+                guard["last_snapshot"] = before.digest
+                expected = guard.get("expected_snapshot")
+                if expected is not None and expected != before.digest:
+                    return {"status": "stale", "reason": "The observed snapshot changed since the plan context",
+                            "snapshot": before.digest, "context": current_plan_context(before, guard["steps"])}
+                runtime = getattr(self.native_bridge, "last_runtime", None)
+                if (not isinstance(selection, PauseRequest) and (
+                        getattr(self.native_bridge, "supports_wakeup", False) is not True
+                        or not isinstance(runtime, dict) or runtime.get("paused") is not True)):
+                    return {"status": "blocked", "reason": "Plans require verified pause; explicitly pause first when needed"}
             if selection is not None:
                 if isinstance(selection, REQUEST_TYPES):
                     runtime = getattr(self.native_bridge, "last_runtime", None)
@@ -488,6 +544,7 @@ def build_direct_server(config_path: Path, *, native_bridge: NativeResearchBridg
                         connection: DirectConnection | None = None,
                         context_provider: Callable[[], tuple[DirectConfig, NativeResearchBridge | None]] | None = None,
                         knowledge_provider: Callable[[], GameKnowledge] | None = None,
+                        task_store_path: Path | None = None,
                         persistent_campaign: bool = False, existing_game: bool = False) -> FastMCP:
     if connection is None:
         connection = DirectConnection(config_path, native_bridge=native_bridge)
@@ -526,6 +583,41 @@ def build_direct_server(config_path: Path, *, native_bridge: NativeResearchBridg
     register_prompts(server, campaign=persistent_campaign, existing_game=existing_game)
     readonly = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
     writing = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
+    plan_writing = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False)
+    workflow = TaskWorkflow(connection, task_store_path if task_store_path is not None else
+                            Path(config_path).parent / "tasks.sqlite")
+
+    async def call_write(method, *args, **kwargs):
+        try:
+            return await asyncio.to_thread(method, *args, **kwargs)
+        except DirectLockBusy:
+            return {"status": "busy", "reason": "Another writer owns the game mailbox; this request was not queued"}
+
+    @server.tool(annotations=plan_writing)
+    async def execute_plan(request_id: str, steps: PlanSteps, expected_snapshot: str | None = None) -> dict:
+        """Execute 1..20 precise actions serially; return all verified receipts in this same call.
+
+        Use one stable unique request_id for one intent. Retrying the SAME ID and
+        exact plan retrieves its original state without dispatching again; changed
+        steps or expected_snapshot conflict. Reuse fresh known IDs; no prepare call
+        is required. Each step uses kind plus the existing tool's exact parameters,
+        e.g. {kind:'queue_ship',starbase_id:'12',design_id:'7'}.
+        Requires verified pause, or explicit set_paused(true) as the first step.
+        Same-fleet unfinished orders cannot be chained. Stops on the first problem;
+        prior orders remain. Completed means dispatch verified, not natural completion.
+        Never use a new ID to replay an uncertain result. No automatic rollback.
+        """
+        return await workflow.execute_async(request_id, steps, expected_snapshot)
+
+    @server.tool(annotations=readonly)
+    def task_result(request_id: str) -> dict:
+        """Retrieve a persisted plan after a lost reply, even offline; never query or command the game."""
+        return workflow.store.get(request_id)
+
+    @server.tool(annotations=plan_writing)
+    def cancel_task(request_id: str) -> dict:
+        """Stop future plan steps. Current submission still verifies and cleans up; orders are not undone."""
+        return workflow.store.cancel(request_id)
 
     def context() -> tuple[DirectConfig, NativeResearchBridge | None]:
         if context_provider is not None:
@@ -569,22 +661,22 @@ def build_direct_server(config_path: Path, *, native_bridge: NativeResearchBridg
     @server.tool(annotations=readonly)
     async def observe_empire() -> dict:
         """Read the latest existing direct snapshot and its freshness; never publish a command."""
-        return await asyncio.to_thread(connection.observe)
+        return await call_write(connection.observe)
 
     @server.tool(annotations=writing)
     async def request_observation() -> dict:
         """Ask the running game for a fresh dump, then validate its empire, build and session."""
-        return await asyncio.to_thread(connection.request_observation)
+        return await call_write(connection.request_observation)
 
     @server.tool(annotations=writing)
     async def probe_connection() -> dict:
         """Publish a locally authorized nonce probe; verify it in fresh state, then disarm the inbox."""
-        return await asyncio.to_thread(connection.probe)
+        return await call_write(connection.probe)
 
     @server.tool(annotations=writing)
     async def execute_action(action_id: str) -> dict:
         """Execute one fixed, locally allowed action and verify its receipt and real postconditions."""
-        return await asyncio.to_thread(connection.execute, action_id)
+        return await call_write(connection.execute, action_id)
 
     @server.tool(annotations=writing)
     async def issue_order(order: dict) -> dict:
@@ -598,7 +690,7 @@ def build_direct_server(config_path: Path, *, native_bridge: NativeResearchBridg
         the same system and appends a 30-day wait. Every ID must be freshly observed.
         Unsupported research/build/diplomacy orders are rejected.
         """
-        return await asyncio.to_thread(connection.issue_order, order)
+        return await call_write(connection.issue_order, order)
 
     @server.tool(annotations=writing)
     async def select_research(area: Literal["physics", "society", "engineering"], technology_id: str) -> dict:
@@ -607,7 +699,7 @@ def build_direct_server(config_path: Path, *, native_bridge: NativeResearchBridg
         Requires the tested native backend, explicit local authorization and a
         fresh matching empire snapshot. Does not complete or grant technology.
         """
-        return await asyncio.to_thread(connection.select_research, area, technology_id)
+        return await call_write(connection.select_research, area, technology_id)
 
     @server.tool(annotations=writing)
     async def queue_district(planet_id: str, district_id: str) -> dict:
@@ -616,7 +708,7 @@ def build_direct_server(config_path: Path, *, native_bridge: NativeResearchBridg
         Native legality/cost checks apply. Verification requires a new pending
         exact job, unchanged district levels and same-month stock payment.
         """
-        return await asyncio.to_thread(connection.queue_district, planet_id, district_id)
+        return await call_write(connection.queue_district, planet_id, district_id)
 
     @server.tool(annotations=writing)
     async def set_paused(paused: StrictBool) -> dict:
@@ -625,7 +717,7 @@ def build_direct_server(config_path: Path, *, native_bridge: NativeResearchBridg
         Requires the pinned native worker. Protected modal/event pauses may
         reject unpausing. STOP disarms orders and does not change game time.
         """
-        return await asyncio.to_thread(connection.set_paused, paused)
+        return await call_write(connection.set_paused, paused)
 
     @server.tool(annotations=writing)
     async def queue_building(planet_id: str, zone_id: str, building_id: str) -> dict:
@@ -635,7 +727,7 @@ def build_direct_server(config_path: Path, *, native_bridge: NativeResearchBridg
         The engine validates availability, slots and costs. Verification needs
         one new unfinished exact job, unchanged buildings and actual payment.
         """
-        return await asyncio.to_thread(connection.queue_building, planet_id, zone_id, building_id)
+        return await call_write(connection.queue_building, planet_id, zone_id, building_id)
 
     @server.tool(annotations=writing)
     async def queue_ship(starbase_id: str, design_id: str) -> dict:
@@ -644,7 +736,7 @@ def build_direct_server(config_path: Path, *, native_bridge: NativeResearchBridg
         Requires a refreshed paused session. Native design, availability and
         resource checks apply; a new exact unfinished paid job must be observed.
         """
-        return await asyncio.to_thread(connection.queue_ship, starbase_id, design_id)
+        return await call_write(connection.queue_ship, starbase_id, design_id)
 
     @server.tool(annotations=writing)
     async def queue_colony_ship(starbase_id: str, design_id: str, species_id: str) -> dict:
@@ -653,7 +745,7 @@ def build_direct_server(config_path: Path, *, native_bridge: NativeResearchBridg
         Uses the separate colony-ship buildable, preserving species data.
         Requires a paused session and complete owned species/shipyard references.
         """
-        return await asyncio.to_thread(connection.queue_colony_ship, starbase_id, design_id, species_id)
+        return await call_write(connection.queue_colony_ship, starbase_id, design_id, species_id)
 
     @server.tool(annotations=writing)
     async def upgrade_building(planet_id: str, zone_id: str, building_id: str, target_building_id: str) -> dict:
@@ -662,7 +754,7 @@ def build_direct_server(config_path: Path, *, native_bridge: NativeResearchBridg
         Read building_id from zones_by_id.buildings_by_id. Target must pass the
         game's upgrade/technology/ownership checks. Requires a paused session.
         """
-        return await asyncio.to_thread(connection.planet_command, "upgrade_building", planet_id=planet_id,
+        return await call_write(connection.planet_command, "upgrade_building", planet_id=planet_id,
                                        zone_id=zone_id, building_id=building_id, target_building=target_building_id)
 
     @server.tool(annotations=writing)
@@ -672,7 +764,7 @@ def build_direct_server(config_path: Path, *, native_bridge: NativeResearchBridg
         Requires a paused session, native legality, and fresh proof that only
         the requested building disappeared from its observed zone.
         """
-        return await asyncio.to_thread(connection.planet_command, "demolish_building", planet_id=planet_id,
+        return await call_write(connection.planet_command, "demolish_building", planet_id=planet_id,
                                        zone_id=zone_id, building_id=building_id)
 
     @server.tool(annotations=writing)
@@ -682,7 +774,7 @@ def build_direct_server(config_path: Path, *, native_bridge: NativeResearchBridg
         zone_id is an observed zone handle; target_zone_id is a zone template.
         Requires a paused session; the engine validates slots, unlocks and cost.
         """
-        return await asyncio.to_thread(connection.planet_command, "convert_zone", planet_id=planet_id,
+        return await call_write(connection.planet_command, "convert_zone", planet_id=planet_id,
                                        zone_id=zone_id, target_zone=target_zone_id)
 
     @server.tool(annotations=writing)
@@ -691,7 +783,7 @@ def build_direct_server(config_path: Path, *, native_bridge: NativeResearchBridg
 
         Requires an exact owned queue/item/colony join and a paused session.
         """
-        return await asyncio.to_thread(connection.planet_command, "cancel_construction", planet_id=planet_id,
+        return await call_write(connection.planet_command, "cancel_construction", planet_id=planet_id,
                                        item_id=item_id)
 
     @server.tool(annotations=writing)
@@ -701,7 +793,7 @@ def build_direct_server(config_path: Path, *, native_bridge: NativeResearchBridg
         Normal pathfinding, ownership and survey legality apply. Verifies the
         exact pending order; completion must be observed separately.
         """
-        return await asyncio.to_thread(connection.fleet_command, "survey_planet", fleet_id, planet_id)
+        return await call_write(connection.fleet_command, "survey_planet", fleet_id, planet_id)
 
     @server.tool(annotations=writing)
     async def build_station(fleet_id: str, planet_id: str, station_type: Literal["mining", "research", "outpost"]) -> dict:
@@ -710,7 +802,7 @@ def build_direct_server(config_path: Path, *, native_bridge: NativeResearchBridg
         Target is an observed physical body (outposts use a surveyed star).
         Native legality and normal resource payment apply. Requires pause.
         """
-        return await asyncio.to_thread(connection.fleet_command, "build_station", fleet_id, planet_id, station_type)
+        return await call_write(connection.fleet_command, "build_station", fleet_id, planet_id, station_type)
 
     @server.tool(annotations=writing)
     async def colonize_planet(fleet_id: str, planet_id: str) -> dict:
@@ -719,7 +811,7 @@ def build_direct_server(config_path: Path, *, native_bridge: NativeResearchBridg
         Native survey/habitability/ownership checks apply. Requires pause.
         Verifies the exact order; establishment of the colony is separate.
         """
-        return await asyncio.to_thread(connection.fleet_command, "colonize_planet", fleet_id, planet_id)
+        return await call_write(connection.fleet_command, "colonize_planet", fleet_id, planet_id)
 
     @server.tool(annotations=readonly)
     def list_actions() -> list[dict]:
