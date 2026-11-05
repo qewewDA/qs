@@ -9,7 +9,7 @@ from .observe import Observation
 
 _OBJECT_FIELDS = (
     "id", "name", "owner", "controller", "system_id", "ship_class", "mobile",
-    "orders_known", "orders", "actions", "build_queue", "colony",
+    "orders_known", "orders", "actions", "current_order", "order", "queued_orders", "combat", "build_queue", "colony",
     "districts_known", "district_levels", "zones_known", "zones_by_id",
 )
 _IMMEDIATE = frozenset({

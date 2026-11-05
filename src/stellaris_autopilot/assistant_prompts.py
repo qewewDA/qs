@@ -95,7 +95,17 @@ def render_prompt(*, playstyle: str = "", campaign: bool = True, existing_game: 
         "只有丢失回复或查询进行中任务时用 task_result(request_id)，需要停止后续步骤才 cancel_task。"
         "已有任务结果不得换 ID 重放；cancel_requested 只表示停止未来步骤，已提交步骤仍需核验清理。"
         "短计划不等待自然完成，不将同舰队的多条未完成订单批量连发当路线。"
-        "仅下单的任务保持暂停；只有我的任务允许时间推进时才恢复游戏，分段观察并在完成或异常时暂停。",
+        "仅下单的任务保持暂停。要求勘察完成或进入系统后停下，且我已明确授权推进时间与上限时，"
+        "优先一次 submit_completion(request_id, intent, time_authorization)，让宿主负责等待与固定顺序的接续。"
+        "支持 survey_body、冻结完整已观察天体列表的 survey_system、进入系统并停船的 enter_system；"
+        "time_authorization 必须显式给 allow_time_advance=true、max_game_days、max_wall_seconds、final_pause=true。"
+        "未授权时间或上限不明确时先问一次，不自行跑长时间。目标舰队须已知空订单；不偷偷停止旧任务。"
+        "task_result(request_id, wait_seconds=30) 最多等30秒，只读持久记录，不观察或操作游戏；"
+        "等待调用断开不取消后台任务。不因running反复request_observation或重发任务。"
+        "客户端不能自动唤醒Agent时说明后台仍在执行，可稍后用同ID查询；不承诺无人唤醒后的新策略决策。"
+        "完成或异常查看goal_state与final_pause：completed只指已证明的目标状态和结束暂停，"
+        "进入系统不代表到系统中心，队列消失也不证明建好、殖民完或造出舰船。"
+        "玩家暂停、订单变动、未知观测、读档歧义或达到上限时停止接续，不自动恢复或重放。",
         "【我的分工和打法】\n"
         "主要处理星球建设和舰船操控；内阁、传统、飞升由我选择，读取这些选择来理解打法。"
         "其他不明确的操作范围问我。知识库已挂载时检索当前版本定义，并结合帝国修正核对数值；"

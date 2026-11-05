@@ -48,6 +48,9 @@ class TaskStore:
         if record is not None and record["status"] == "running" and owner_alive(record["owner"]) is False:
             record["status"] = "interrupted"
             record["reason"] = "The original executor exited; inspect the command journal. This ID is never dispatched again."
+            if record.get("task_kind") == "natural_completion":
+                record["goal_state"] = "unknown"
+                record["final_pause"] = {"status": "unverified", "reason": "The executor exited; current game pause is unknown"}
             for step in record["steps"]:
                 if step["status"] == "executing":
                     step["status"] = "unverified"
@@ -67,7 +70,8 @@ class TaskStore:
         finally:
             db.close()
 
-    def claim(self, request_id: str, plan_hash: str, steps: list[dict], expected_snapshot, owner: dict) -> tuple[dict, bool]:
+    def claim(self, request_id: str, plan_hash: str, steps: list[dict], expected_snapshot, owner: dict,
+              *, task_metadata: dict | None = None) -> tuple[dict, bool]:
         request_identifier(request_id)
         with self._transaction() as db:
             old = self._read(db, request_id)
@@ -82,8 +86,35 @@ class TaskStore:
                       "created_at": time.time(), "updated_at": time.time(),
                       "steps": [{"index": i, "request": step, "status": "pending"} for i, step in enumerate(steps)],
                       "note": "Dispatch verification is separate from natural completion. Never resubmit with a new ID after a lost reply."}
+            if task_metadata is not None:
+                if set(task_metadata) & (set(record) - {"completion_scope", "note"}):
+                    raise ValueError("Task metadata cannot replace durable task identity or state")
+                record.update(task_metadata)
             db.execute("INSERT INTO tasks VALUES (?,?,?)", (request_id, plan_hash, json.dumps(record)))
             return record, True
+
+    def completion_progress(self, request_id: str, **fields) -> dict:
+        """Persist small runner transitions; never keep a transaction open while waiting."""
+        allowed = {"phase", "baseline", "last_evidence", "final_pause", "goal_state", "active_index",
+                   "observations", "time_state", "cleanup_error"}
+        if not set(fields) <= allowed:
+            raise ValueError("Unknown completion progress field")
+        with self._transaction() as db:
+            record = self._read(db, request_id)
+            if record is None or record.get("task_kind") != "natural_completion" or record["status"] != "running":
+                raise ValueError("No running natural-completion task")
+            record.update(fields)
+            self._write(db, record)
+            return record
+
+    def completion_step(self, request_id: str, index: int, evidence: dict):
+        with self._transaction() as db:
+            record = self._read(db, request_id)
+            if record.get("task_kind") != "natural_completion" or record["steps"][index]["status"] not in {
+                    "pending", "verified"}:
+                raise ValueError("No eligible natural-completion step")
+            record["steps"][index].update(status="goal_satisfied", evidence=evidence)
+            self._write(db, record)
 
     def cancel(self, request_id: str) -> dict:
         request_identifier(request_id)

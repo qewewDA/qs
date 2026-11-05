@@ -6,7 +6,7 @@ acknowledgement is a substitute for the action's gameplay postconditions.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 import asyncio
 import copy
 import json
@@ -16,11 +16,11 @@ import sqlite3
 import threading
 import time
 import uuid
-from typing import Callable, Literal
+from typing import Annotated, Callable, Literal
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
-from pydantic import StrictBool
+from pydantic import Field, StrictBool, StrictInt
 
 from .direct import (
     DirectConfig, atomic_publish, disarm_inbox, load_direct_config, publish_observation, publish_order,
@@ -48,6 +48,8 @@ from .assistant_prompts import register_prompts
 from .action_context import current_plan_context, verified_context
 from .task_plan import PlanSteps
 from .task_workflow import TaskWorkflow
+from .completion_goal import CompletionIntent, TimeAuthorization
+from .completion_workflow import CompletionWorkflow
 
 
 class DirectLockBusy(ValueError):
@@ -548,6 +550,20 @@ def build_direct_server(config_path: Path, *, native_bridge: NativeResearchBridg
                         persistent_campaign: bool = False, existing_game: bool = False) -> FastMCP:
     if connection is None:
         connection = DirectConnection(config_path, native_bridge=native_bridge)
+    store_path = task_store_path if task_store_path is not None else Path(config_path).parent / "tasks.sqlite"
+    completion = CompletionWorkflow(connection, store_path)
+
+    @asynccontextmanager
+    async def lifespan(_server):
+        try:
+            yield {}
+        finally:
+            # Graceful server exit cancels future actions and joins native cleanup.
+            import anyio
+
+            with anyio.CancelScope(shield=True):
+                await completion.shutdown()
+
     server = FastMCP("Stellaris Direct Connection (experimental)", instructions=(
         "Use the keyboardless game command-file connection to read a pinned empire and test delivery. "
         "The pinned native backend can wake the owned game while paused; file-only mode needs scheduled game dates. "
@@ -569,6 +585,9 @@ def build_direct_server(config_path: Path, *, native_bridge: NativeResearchBridg
         "results include their existing postcondition proof and compact context: use that result instead of "
         "requesting another dump merely to prove the same action. All writes remain serial and revalidated by "
         "the host. Order verification does not mean arrival, construction completion or colony establishment. "
+        "For an explicitly time-authorized supported natural endpoint, submit_completion runs a bounded "
+        "host-side task and returns a durable ID. task_result may wait up to 30 seconds without querying "
+        "the game. Do not make the model poll snapshots while the host is waiting. "
         "Distinguish unknown, known-empty and known-value. A false known/queue_known/buildings_known flag "
         "or null data is not proof of an empty research slot, construction queue or building zone. "
         "Use the Chinese stellaris_agent MCP prompt once to establish the continuing conversation workflow; "
@@ -579,13 +598,12 @@ def build_direct_server(config_path: Path, *, native_bridge: NativeResearchBridg
             "Report blocked/failed phases and stop; never loop retries, inspect client source, write stdio probes, "
             "or restart servers as part of ordinary onboarding."
         if existing_game else ""
-    ), log_level="WARNING")
+    ), log_level="WARNING", lifespan=lifespan)
     register_prompts(server, campaign=persistent_campaign, existing_game=existing_game)
     readonly = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
     writing = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
     plan_writing = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False)
-    workflow = TaskWorkflow(connection, task_store_path if task_store_path is not None else
-                            Path(config_path).parent / "tasks.sqlite")
+    workflow = TaskWorkflow(connection, store_path)
 
     async def call_write(method, *args, **kwargs):
         try:
@@ -610,14 +628,44 @@ def build_direct_server(config_path: Path, *, native_bridge: NativeResearchBridg
         return await workflow.execute_async(request_id, steps, expected_snapshot)
 
     @server.tool(annotations=readonly)
-    def task_result(request_id: str) -> dict:
-        """Retrieve a persisted plan after a lost reply, even offline; never query or command the game."""
-        return workflow.store.get(request_id)
+    async def task_result(request_id: str, wait_seconds: Annotated[StrictInt, Field(ge=0, le=30)] = 0) -> dict:
+        """Read any persisted task, optionally wait 0..30 seconds; never query or command the game.
+
+        Cancelling or timing out this result wait does not cancel a natural-completion
+        worker. A running result is not an instruction to repeat observations or
+        submit again. Reuse this ID after a lost reply, including while offline.
+        """
+        return await completion.result(request_id, wait_seconds)
+
+    @server.tool(annotations=plan_writing)
+    async def submit_completion(request_id: str, intent: CompletionIntent,
+                                time_authorization: TimeAuthorization,
+                                expected_snapshot: str | None = None) -> dict:
+        """Start one bounded host-side survey or system-entry task; return its durable state promptly.
+
+        Requires explicit allow_time_advance=true, max_game_days, max_wall_seconds,
+        final_pause=true, an initially paused game and a fleet with known empty orders.
+        survey_body names fleet_id/planet_id/system_id. survey_system freezes the
+        complete observed planet_ids list and follows that exact order, skipping
+        already-surveyed bodies. enter_system names fleet_id/planet_id/system_id:
+        planet_id anchors the visited destination; stop on detected entry is included,
+        not arrival at the center. No speed change or arbitrary condition/script.
+        Same ID and intent retrieves the original task; changed intent/authorization
+        conflicts. Use task_result for a lost reply; never replay under a new ID.
+        Cancel stops future work and verifies final pause; submitted orders remain.
+        External pause/order change, unknown evidence or a bound stops the runner.
+        Polling may overshoot a game tick. Manual save reload requires reconnect.
+        """
+        return await asyncio.to_thread(completion.submit, request_id, intent, time_authorization, expected_snapshot)
 
     @server.tool(annotations=plan_writing)
     def cancel_task(request_id: str) -> dict:
-        """Stop future plan steps. Current submission still verifies and cleans up; orders are not undone."""
-        return workflow.store.cancel(request_id)
+        """Stop future task work. Current submission verifies and cleans up; game orders are not undone.
+
+        A natural-completion worker then attempts its authorized final pause only
+        when the original live identity is still proven. Read final_pause evidence.
+        """
+        return completion.cancel(request_id)
 
     def context() -> tuple[DirectConfig, NativeResearchBridge | None]:
         if context_provider is not None:

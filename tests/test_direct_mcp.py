@@ -98,7 +98,7 @@ def test_tool_contract_separates_observation_from_writes(config_path):
                           "queue_ship", "upgrade_building", "demolish_building", "convert_zone", "cancel_construction",
                           "survey_planet", "build_station", "colonize_planet", "queue_colony_ship",
                           "search_game_knowledge", "get_game_definition", "get_wiki_reference", "knowledge_status",
-                          "execute_plan", "task_result", "cancel_task"}
+                          "execute_plan", "task_result", "cancel_task", "submit_completion"}
     assert tools["observe_empire"].annotations.readOnlyHint is True
     assert tools["probe_connection"].annotations.readOnlyHint is False
     assert tools["request_observation"].annotations.readOnlyHint is False
