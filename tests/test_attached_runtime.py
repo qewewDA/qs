@@ -15,6 +15,7 @@ import pytest
 pytest.importorskip("mcp")
 
 import stellaris_autopilot.attached_runtime as module
+from stellaris_autopilot import connection_diagnostics
 from stellaris_autopilot.assistant_prompts import render_prompt
 from stellaris_autopilot.attached_runtime import AttachedRuntime, connect_existing
 from stellaris_autopilot.campaign import CampaignError
@@ -25,6 +26,13 @@ from stellaris_autopilot.observe import Observation
 
 
 TOKEN = "a" * 32
+
+
+@pytest.fixture(autouse=True)
+def supported_fake_executable(monkeypatch):
+    # Runtime tests use fake handles, not a copied proprietary game executable.
+    monkeypatch.setattr(connection_diagnostics, "executable_evidence",
+                        lambda path: {"supported": True})
 
 
 class Process:

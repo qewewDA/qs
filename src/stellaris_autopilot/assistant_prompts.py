@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,33 @@ def render_prompt(*, playstyle: str = "", campaign: bool = True, existing_game: 
             "状态为 stale 表示游戏已退出或旧通道已失效；用户重新读档暂停后用 connect_game(retry=true) 核对新局。"
             "用户在同一进程内切换存档时先 disconnect_game(save=false)，再连接当前局。"
         )
+        tool_server = server_name if server_name != "当前群星 MCP 服务" else "stellaris-campaign"
+        status_tool = json.dumps(f"mcp__{tool_server}__attached_status", ensure_ascii=False)
+        connect_tool = json.dumps(f"mcp__{tool_server}__connect_game", ensure_ascii=False)
+        routing = (
+            "【工具定位，先执行再汇报】\n"
+            "先看当前客户端声明的完整工具 SDK。外层只有 run_code 时，"
+            "SDK 的 ToolArgsMap 中声明的 MCP 方法仍是可用工具，应在 run_code 内通过 tools 调用。"
+            "不要因为外层仅有 run_code 就宣称 MCP 不可见；Object.keys(tools)、函数 toString 和反射结果"
+            "不能代替 SDK 声明。SDK 已声明下列名称时，一次程序完成状态检查和首次连接，并直接 return 回执：\n"
+            "```javascript\n"
+            f"const raw = await tools[{status_tool}]({{}});\n"
+            "let s = raw?.structuredContent;\n"
+            "if (s == null && Array.isArray(raw?.content)) {\n"
+            "  for (const c of raw.content) {\n"
+            '    if (c.type === "text") { try { s = JSON.parse(c.text); break; } catch {} }\n'
+            "  }\n"
+            "}\n"
+            "s ??= raw;\n"
+            'return raw?.isError !== true && s?.state === "disconnected" && s?.mcp_ready === true\n'
+            f"  ? await tools[{connect_tool}]({{}}) : raw;\n"
+            "```\n"
+            "仅在 SDK 具有这些声明时使用这段代码；工具直接可用的客户端用其原生调用方式。"
+            "失败就使用回执中的 code、reason、diagnostics、next_step 简短报告；"
+            "不反射工具、不猜参数、不读状态目录或 SQLite，不调用未声明的清理工具。"
+            "不写 SQL、删锁、改 hash pin 来解除阻塞。"
+            "版本不支持需要验证原生适配，重建知识库不能恢复原生调用。"
+        )
         saving = (
             "我说“保存”或“中途保存”时调用 checkpoint_game，核对 checkpoint_saved，"
             "新存档另存到游戏的 save games/qs_mcp 目录，游戏保持运行。"
@@ -75,6 +103,7 @@ def render_prompt(*, playstyle: str = "", campaign: bool = True, existing_game: 
         "提示词本身不能建立连接，也不能把 Python 进程存在当作连接成功。"
         + connection_text,
         connection_note.strip(),
+        routing if existing_game else "",
         "【先读现状】\n" + startup + "首次接入完成后简要报告帝国、日期和可用操作，保持暂停，等我的下一条中文命令。",
         "【后续直接执行】\n"
         "把我的自然语言转换成精确工具操作，自行查名称、对象 ID、合法性、成本与前置条件。"

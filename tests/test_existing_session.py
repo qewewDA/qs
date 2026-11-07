@@ -10,6 +10,7 @@ import pytest
 from stellaris_autopilot import existing_session
 from stellaris_autopilot.assistant_prompts import render_prompt
 from stellaris_autopilot.campaign import CampaignError
+from stellaris_autopilot.connection_diagnostics import ConnectionPreflightError
 from stellaris_autopilot.direct_mcp import build_direct_server
 from stellaris_autopilot.existing_session import ExistingGameSession
 
@@ -127,6 +128,71 @@ def test_failed_connect_is_cached_and_retry_requires_explicit_flag(tmp_path, mon
     assert third["summary"] == runtime.initial_summary
     assert third["initial_observation_verified"] is True
     assert len(calls) == 2
+
+
+def test_structured_failure_is_persisted_and_cached_without_more_inspection(tmp_path, monkeypatch):
+    calls = []
+    diagnostics = {"executable": {"supported": False, "installed_version_hint": "Cygnus v4.5.3"}}
+
+    def fail(*args, **kwargs):
+        calls.append(1)
+        kwargs["progress"]("verify_running_process")
+        raise ConnectionPreflightError("unsupported_game_build", "Unsupported game executable",
+                                       diagnostics, "Install a verified native adapter.")
+
+    monkeypatch.setattr(existing_session, "resolve_user_dir", lambda *args: tmp_path / "user")
+    monkeypatch.setattr(existing_session, "connect_existing", fail)
+    session = _session(tmp_path)
+    result = session.connect_game()
+    saved = json.loads((session.state_root / "connection-progress.json").read_text(encoding="utf-8"))
+
+    assert result["status"] == "blocked"
+    assert result["code"] == "unsupported_game_build"
+    assert result["phase"] == "verify_running_process"
+    assert result["diagnostics"] == diagnostics
+    assert result["next_step"] == "Install a verified native adapter."
+    assert result["next_tool"] is None
+    assert saved["state"] == "failed"
+    assert saved["last_error"]["diagnostics"] == diagnostics
+    assert saved["last_error"]["code"] == result["code"]
+    assert saved["elapsed_seconds"] == result["elapsed_seconds"]
+    again = session.connect_game()
+    assert again["cached_failure"] is True and again["diagnostics"] == diagnostics
+    assert again["next_step"] == result["next_step"]
+    assert session.status()["last_error"] == saved["last_error"]
+    assert calls == [1]
+
+
+def test_terminal_progress_tracks_success_disconnect_and_close(tmp_path, monkeypatch):
+    runtime = _Runtime(tmp_path)
+    monkeypatch.setattr(existing_session, "resolve_user_dir", lambda *args: tmp_path / "user")
+    monkeypatch.setattr(existing_session, "connect_existing", _connector(runtime, []))
+    session = _session(tmp_path)
+    progress = session.state_root / "connection-progress.json"
+
+    assert session.connect_game()["status"] == "connected"
+    assert json.loads(progress.read_text(encoding="utf-8"))["state"] == "connected"
+    session.disconnect_game(save=False)
+    assert json.loads(progress.read_text(encoding="utf-8"))["state"] == "disconnected"
+    session.close()
+    assert json.loads(progress.read_text(encoding="utf-8"))["state"] == "closed"
+
+
+def test_progress_write_failure_does_not_undo_a_verified_connection(tmp_path, monkeypatch):
+    runtime = _Runtime(tmp_path)
+    monkeypatch.setattr(existing_session, "resolve_user_dir", lambda *args: tmp_path / "user")
+    monkeypatch.setattr(existing_session, "connect_existing", _connector(runtime, []))
+
+    def fail(*args):
+        raise PermissionError("private local path")
+
+    monkeypatch.setattr(existing_session, "_atomic", fail)
+    session = _session(tmp_path)
+    result = session.connect_game()
+    assert result["status"] == "connected"
+    assert result["progress_persistence_error"] == "connection_progress_unwritable"
+    assert session._runtime is runtime and runtime.closed is False
+    assert "private" not in json.dumps(result)
 
 
 def test_successful_connect_passes_timeout_and_progress_and_publishes_summary(tmp_path, monkeypatch):
@@ -370,3 +436,53 @@ def test_stdio_handshake_lists_connect_game_without_game_or_knowledge(tmp_path):
     elapsed = time.perf_counter() - started
     print(f"stdio handshake seconds: {elapsed:.3f}")
     assert elapsed < 10
+
+
+def test_stdio_unsupported_build_returns_terminal_diagnostics_before_attachment(tmp_path):
+    pytest.importorskip("mcp")
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    repo = Path(__file__).resolve().parents[1]
+    game = tmp_path / "game"
+    user = tmp_path / "user"
+    state = tmp_path / "state"
+    game.mkdir()
+    user.mkdir()
+    (game / "stellaris.exe").write_bytes(b"unsupported fake executable, never run")
+    (game / "launcher-settings.json").write_text(
+        json.dumps({"version": "Cygnus v4.5.3 (4e91)"}), encoding="utf-8")
+    (user / ".qs_existing_controller.lock").write_text(
+        json.dumps({"controller_pid": 123, "session": "a" * 32}), encoding="utf-8")
+    lock_before = (user / ".qs_existing_controller.lock").read_bytes()
+
+    async def run():
+        parameters = StdioServerParameters(
+            command=sys.executable,
+            args=[str(repo / "scripts" / "serve_existing_game.py"),
+                  "--state-dir", str(state), "--game-dir", str(game), "--user-dir", str(user)],
+            cwd=str(repo),
+        )
+        async with stdio_client(parameters) as (read, write):
+            async with ClientSession(read, write) as client:
+                await client.initialize()
+                response = await client.call_tool("connect_game", {})
+                assert not response.isError
+                payload = response.structuredContent or json.loads(response.content[0].text)
+                assert payload["code"] == "unsupported_game_build"
+                assert payload["state"] == "failed"
+                assert payload["diagnostics"]["executable"]["installed_version_hint"] == "Cygnus v4.5.3 (4e91)"
+                assert payload["diagnostics"]["controller_lock"]["present"] is True
+                assert payload["diagnostics"]["game_commands_sent"] == 0
+                assert payload["retry_automatically"] is False
+                again = await client.call_tool("connect_game", {})
+                cached = again.structuredContent or json.loads(again.content[0].text)
+                assert cached["cached_failure"] is True
+                assert cached["diagnostics"] == payload["diagnostics"]
+                progress = json.loads((state / "connection-progress.json").read_text(encoding="utf-8"))
+                assert progress["state"] == "failed"
+                assert progress["last_error"]["code"] == "unsupported_game_build"
+                assert not (state / "sessions").exists()
+
+    asyncio.run(asyncio.wait_for(run(), timeout=20))
+    assert (user / ".qs_existing_controller.lock").read_bytes() == lock_before

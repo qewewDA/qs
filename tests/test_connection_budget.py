@@ -184,6 +184,14 @@ def test_connect_existing_uses_one_deadline_for_process_and_native(tmp_path, mon
         def close(self):
             pass
 
+    preflight_calls = []
+
+    def preflight(executable, state_root, preview_journal, *, user_dir=None):
+        # No-side-effect stub: the fake executable in tmp_path cannot be read/hashed,
+        # so the real file/build preflight must not run in this budget-only test.
+        preflight_calls.append((executable, state_root, preview_journal, user_dir))
+
+    monkeypatch.setattr(attached_runtime, "check_connection_preflight", preflight)
     monkeypatch.setattr(attached_runtime, "attach_game", attach)
     monkeypatch.setattr(attached_runtime, "NativeResearchBridge", Bridge)
     monkeypatch.setattr(attached_runtime, "AttachedRuntime", Runtime)
@@ -195,6 +203,13 @@ def test_connect_existing_uses_one_deadline_for_process_and_native(tmp_path, mon
         timeout_seconds=12,
     )
 
+    # The preflight must be reached before attach, with the resolved state root and
+    # the caller-supplied executable/user_dir, so the deadline test still bisects the
+    # same connection phases as production.
+    assert preflight_calls == [
+        (tmp_path / "stellaris.exe", (tmp_path / "state").resolve(),
+         attached_runtime._PreviewJournal, tmp_path / "user"),
+    ]
     assert attach_deadlines == [112.0]
     assert native_deadlines == [112.0]
     assert result.initialized is True

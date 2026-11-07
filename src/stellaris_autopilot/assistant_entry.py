@@ -97,6 +97,10 @@ def export_entry(config_path: Path, output_dir: Path, *, server_name: str | None
            "接入成功已含精简初始状态，无需重复完整存档；失败就报告阶段与原因，停止重试。"
            "游戏重开并暂停后，旧连接为 stale 时调用 connect_game(retry=true) 重新核对当前局。"
            "在同一进程内换档时先 disconnect_game(save=false)，再连接，无需重启 MCP。"
+           "DSH 外层只有 run_code 时，先看完整 SDK 中已声明的 MCP 工具，按一次性提示词的示例调用并解包回执；"
+           "不要把外层工具列表当作缺少 MCP。一次失败回执已有版本、未决操作和控制器锁诊断，"
+           "按 code / reason / diagnostics / next_step 处理，不用反复读本地文件。"
+           "不支持的游戏构建需要验证原生适配；重建知识库不能恢复原生控制。\n"
            "工具不可见时请重连客户端，不要让 Agent 翻源码、编写探针或循环启动服务。\n\n"
            if existing_game else "")
         +

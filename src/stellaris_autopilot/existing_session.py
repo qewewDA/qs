@@ -9,6 +9,7 @@ import time
 from .attached_runtime import connect_existing, resolve_user_dir
 from .campaign import CampaignError, _atomic
 from .connection_cancel import ConnectionCancelled, check_cancelled
+from .connection_diagnostics import ConnectionPreflightError
 from .direct import load_direct_config
 from .knowledge import GameKnowledge
 
@@ -41,13 +42,23 @@ class ExistingGameSession:
         self._error = self._summary = None
         self._closed = False
         self._attempt_cancel = None
+        self._progress_error = None
 
     def _phase(self, name: str):
         check_cancelled(self._attempt_cancel, name)
         with self._state_lock:
             self._phase_name = name
-        _atomic(self.state_root / "connection-progress.json",
-                (json.dumps(self.status(), ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+        self._persist_status()
+
+    def _persist_status(self):
+        """Persist terminal states too; a telemetry write cannot undo a live connection."""
+        try:
+            _atomic(self.state_root / "connection-progress.json",
+                    (json.dumps(self._status_snapshot(), ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+        except OSError:
+            self._progress_error = "connection_progress_unwritable"
+        else:
+            self._progress_error = None
 
     def status(self) -> dict:
         """Read progress and, when idle, check only the handles we already hold."""
@@ -56,6 +67,10 @@ class ExistingGameSession:
                 self._refresh_liveness()
             finally:
                 self._operation.release()
+        return self._status_snapshot()
+
+    def _status_snapshot(self) -> dict:
+        """Pure in-memory snapshot, also safe for persistence after a state transition."""
         with self._state_lock:
             elapsed = time.monotonic() - self._started if self._state == "connecting" else self._elapsed
             state = ("cancelling" if self._state == "connecting" and self._attempt_cancel is not None
@@ -66,7 +81,22 @@ class ExistingGameSession:
                     "owns_game_process": False, "closes_game_on_disconnect": False,
                     "summary": self._summary, "last_error": self._error,
                     "knowledge_loaded": self._knowledge is not None,
-                    "next_tool": None if self._state == "connected" else "connect_game"}
+                    "progress_persistence_error": self._progress_error,
+                    "next_tool": "connect_game" if self._state == "disconnected" else None}
+
+    def _blocked_result(self, *, cached=False) -> dict:
+        snapshot = self.status()
+        error = snapshot.get("last_error") or {}
+        return {
+            "status": "blocked", **snapshot,
+            "code": error.get("code", "connection_failed"),
+            "reason": error.get("reason"),
+            "diagnostics": error.get("diagnostics"),
+            "cached_failure": cached, "retry_automatically": False,
+            "next_step": error.get(
+                "next_step", "Report this reason once. Retry only after the user corrects it, with retry=true. "
+                "Do not start probes, edit client code or journal databases, or retry in a loop."),
+        }
 
     def _refresh_liveness(self):
         """Called under the lifecycle lock; detecting a stale runtime never cleans it up."""
@@ -94,6 +124,7 @@ class ExistingGameSession:
                     "phase": phase, "reason": reason,
                     "next_step": "Open the intended save, pause it, then call connect_game(retry=true) once.",
                 }
+            self._persist_status()
 
     def _require(self):
         self._refresh_liveness()
@@ -118,9 +149,7 @@ class ExistingGameSession:
                 self._require()
                 return {"status": "connected", **self.status(), "already_connected": True}
             if self._error is not None and not retry:
-                return {"status": "blocked", **self.status(), "cached_failure": True,
-                        "retry_automatically": False,
-                        "next_step": "Report the reason. Retry only after the user corrects it, with retry=true."}
+                return self._blocked_result(cached=True)
             with self._state_lock:
                 self._state, self._phase_name = "connecting", "resolve_user_directory"
                 self._started, self._error = time.monotonic(), None
@@ -154,16 +183,21 @@ class ExistingGameSession:
                     self._elapsed = time.monotonic() - self._started
                     self._state = "failed"
                     self._error = {"phase": self._phase_name, "reason": reason}
+                    if isinstance(exc, ConnectionPreflightError):
+                        self._phase_name = exc.phase
+                        self._error.update(phase=exc.phase, code=exc.code, diagnostics=exc.diagnostics,
+                                           next_step=exc.next_step)
                     if isinstance(exc, ConnectionCancelled):
                         self._error["code"] = "cancelled"
                         self._phase_name = "cancelled"
-                return {"status": "blocked", **self.status(), "retry_automatically": False,
-                        "next_step": "Report this reason once. Do not start probes, edit client code, or retry in a loop."}
+                self._persist_status()
+                return self._blocked_result()
             self._runtime = runtime
             with self._state_lock:
                 self._state, self._phase_name = "connected", "ready"
                 self._elapsed = time.monotonic() - self._started
                 self._summary = runtime.initial_summary
+            self._persist_status()
             snapshot = self.status()
             return {"status": "connected" if snapshot["connected"] else "blocked", **snapshot,
                     "initial_observation_verified": True}
@@ -186,6 +220,7 @@ class ExistingGameSession:
                 self._state, self._phase_name = "failed", "cancelled"
                 self._summary = None
                 self._error = {"phase": "cancelled", "reason": error, "code": "cancelled"}
+            self._persist_status()
 
     async def connect_game_async(self, *, retry: bool = False) -> dict:
         """Propagate MCP cancellation to the host, and join cleanup before the request ends."""
@@ -278,6 +313,7 @@ class ExistingGameSession:
             with self._state_lock:
                 self._state, self._phase_name = "disconnected", "mcp_ready"
                 self._summary, self._error = None, None
+            self._persist_status()
             return result
 
     def close(self):
@@ -289,3 +325,4 @@ class ExistingGameSession:
             with self._state_lock:
                 self._state, self._phase_name = "closed", "closed"
                 self._summary = None
+            self._persist_status()

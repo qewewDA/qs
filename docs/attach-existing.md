@@ -64,6 +64,41 @@ MCP 客户端配置示例（路径按本机替换，`cwd` 指向仓库根目录�
 
 `attached_status()` 只报告宿主状态：未连接时不访问游戏，不枚举或注入进程，也不读取存档或请求 dump；已连接时只通过已持有的进程句柄做一次快速存活检查，不重新执行 WMI 枚举、不注入、不请求 dump。
 
+### 一次失败提供完整诊断
+
+`connect_game()` 在原生 worker 启动前，同时检查本机 exe 指纹、历史未决 journal 和控制器锁。
+这些文件检查不会附加游戏、执行原生命令或读取游戏存档。失败回执直接包含：
+
+- `code`、`phase`、`reason`、`next_step` 和 `retry_automatically=false`。
+- `diagnostics.executable`：实测 SHA-256、相邻 launcher 文件中的版本提示、受支持版本和指纹。
+  launcher 版本只是标签，不能授权原生调用；无法读取 exe 时 `supported=null`，返回 `executable_unreadable`。
+- `diagnostics.unresolved_operations`：未决操作的 session、operation ID、已知动作种类和未知结果。
+  检查所有 session，公开最多 10 条，`count_at_least` 是数量下界；不会改写、解决或重放操作。
+  记录无法读取时返回 `journal_unreadable`，不能据此声称确有未决记录或 journal 为空。
+- `diagnostics.controller_lock`：锁是否存在、可识别的控制器 PID 和 session；仅凭锁文件不能判断 owner 存活，
+  `owner_liveness=unknown` 时保持锁，由本机核实归属。
+
+出现多项阻塞时使用同一回执里的诊断，不逐项修正后反复连接才能发现下一项。
+不得通过 SQL、删锁、修改版本文字或放宽 hash pin 来绕过检查。
+`unsupported_game_build` 需要验证这个构建的原生函数地址、对象布局和运行结果；
+**重建机制知识包不能让原生桥兼容新版本**。当前固定适配仍是 Cygnus v4.5.2；
+4.5.3 安装文件可以提取知识，但不构成原生控制验证。
+
+连接成功、失败、取消完成、检测到 stale、断开和服务关闭都会更新 `connection-progress.json`。
+普通 `attached_status()` 使用服务内存状态；进度文件用于本机诊断，不能把上次服务遗留的文件当作当前已连接。
+如果进度文件不可写，回执标明 `progress_persistence_error`，已验证的连接不因此被撤销。
+
+### DSH 等通过 SDK 包装工具的客户端
+
+外层只有 `run_code` 并不表示 MCP 工具缺失。以客户端完整 SDK 的 `ToolArgsMap` 声明为准，
+已声明的 MCP 方法通过 `tools["mcp__stellaris-campaign__attached_status"]` 等名称调用。
+不要靠 `Object.keys(tools)`、函数反射或猜工具名排查。
+
+一次性提示词提供了可执行示例：一次程序检查状态，先解包 `structuredContent`，
+缺失时解析 JSON text，再仅在 `state=disconnected` 且 `mcp_ready=true` 时调用一次 `connect_game({})`。
+这样首次状态检查和连接只需一次模型往返；两个依赖的服务调用仍顺序执行。
+`failed`、`stale`、`connecting`、错误回执或无法解析的内容都会停止，示例不会自动填 `retry=true`。
+
 游戏退出或句柄失效后，`attached_status()` 返回 `connected=false`、`state=stale`，清除初始摘要，并给出重新打开游戏、读档、暂停后重连的引导；不会自动重连。
 
 MCP 客户端取消连接请求时，活动尝试会在清理期间显示 `state=cancelling`（`connected=false`）。取消只作用于本次 attempt：在进程发现、原生启动和每次 RPC 前检查；已开始的步骤会等待完成并同步清理，清理完成后取消请求才结束；不会把取消的连接保留为可用 runtime（若 runtime 已建立但结果交付前被取消，也会关闭并标记失败）。取消一个 busy 请求不会取消另一个正在进行的 attempt。取消清理完成后如需再连，使用 `connect_game(retry=true)` 发起新的尝试。

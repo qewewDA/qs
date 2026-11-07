@@ -11,6 +11,7 @@ import uuid
 from .attached_process import attach_game
 from .campaign import CampaignError, _atomic, package_dump
 from .connection_cancel import check_cancelled
+from .connection_diagnostics import check_connection_preflight
 from .direct import (NATIVE_ACTIONS, ORDER_KINDS, OWNERSHIP_HEADER, DirectConfig,
                      disarm_inbox, load_direct_config, ownership_header)
 from .direct_mcp import DirectConnection, _controller_lock, validate_connection
@@ -288,9 +289,7 @@ def connect_existing(executable: Path, state_root: Path, *, user_dir: Path, pid:
 
     phase("check_unresolved_operations")
     state_root = Path(state_root).resolve()
-    for path in state_root.glob("sessions/*/journal.sqlite"):
-        if _PreviewJournal(path).unresolved():
-            raise CampaignError("An earlier attached operation is unresolved; inspect it before reconnecting")
+    check_connection_preflight(executable, state_root, _PreviewJournal, user_dir=user_dir)
     phase("verify_running_process")
     process_options = {"deadline": deadline} if deadline is not None else {}
     if cancel_event is not None:

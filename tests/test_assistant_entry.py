@@ -3,6 +3,8 @@
 import asyncio
 import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -111,6 +113,59 @@ def test_render_prompt_campaign_flag_changes_only_save_claims():
     assert "从最近完成的检查点继续" in campaign
     assert "没有 checkpoint_campaign / save_and_close" in plain
     assert "不能承诺持久保存或自动退出" in plain
+
+
+def test_existing_prompt_routes_sdk_wrapped_tools_without_reflection_or_extra_rounds():
+    text = render_prompt(existing_game=True, server_name="stellaris-campaign")
+    assert 'tools["mcp__stellaris-campaign__attached_status"]({})' in text
+    assert 'tools["mcp__stellaris-campaign__connect_game"]({})' in text
+    assert 's?.state === "disconnected"' in text
+    assert "ToolArgsMap" in text
+    assert "直接 return 回执" in text
+    assert "不能代替 SDK 声明" in text
+    assert "不读状态目录或 SQLite" in text
+    assert "重建知识库不能恢复原生调用" in text
+    assert "run_code" not in render_prompt(existing_game=False)
+
+
+@pytest.mark.parametrize(("payload", "connects"), [
+    ({"state": "disconnected", "mcp_ready": True}, 1),
+    ({"structuredContent": {"state": "disconnected", "mcp_ready": True},
+      "content": [{"type": "text", "text": '{"state":"failed"}'}]}, 1),
+    ({"content": [{"type": "text", "text": '{"state":"disconnected","mcp_ready":true}'}]}, 1),
+    ({"structuredContent": {"state": "failed", "mcp_ready": True}}, 0),
+    ({"structuredContent": {"state": "stale", "mcp_ready": True}}, 0),
+    ({"structuredContent": {"state": "connecting", "mcp_ready": True}}, 0),
+    ({"structuredContent": {"state": "connected", "mcp_ready": True}}, 0),
+    ({"state": "disconnected", "mcp_ready": False}, 0),
+    ({"content": [{"type": "text", "text": "unparseable"}]}, 0),
+    ({"isError": True, "structuredContent": {"state": "disconnected", "mcp_ready": True}}, 0),
+    (None, 0),
+], ids=["direct", "structured", "json-text", "failed", "stale", "connecting", "connected",
+        "not-ready", "bad-text", "error-envelope", "null"])
+def test_sdk_connect_program_executes_against_realistic_mcp_envelopes(payload, connects):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is needed to execute the client-side onboarding example")
+    text = render_prompt(existing_game=True, server_name="stellaris-campaign")
+    program = re.search(r"```javascript\n(.*?)\n```", text, re.DOTALL).group(1)
+    script = (
+        f"const payload = {json.dumps(payload)};\n"
+        "const calls = [];\n"
+        "const tools = {\n"
+        '  "mcp__stellaris-campaign__attached_status": async args => { calls.push(["status", args]); return payload; },\n'
+        '  "mcp__stellaris-campaign__connect_game": async args => { calls.push(["connect", args]); '
+        'return {status:"connected"}; }\n'
+        "};\n"
+        "const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;\n"
+        f"const fn = new AsyncFunction('tools', {json.dumps(program)});\n"
+        "await fn(tools);\n"
+        "console.log(JSON.stringify(calls));\n"
+    )
+    completed = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True,
+                               text=True, encoding="utf-8", timeout=10, check=True)
+    calls = json.loads(completed.stdout)
+    assert calls == [["status", {}]] + [["connect", {}]] * connects
 
 
 def test_export_entry_exports_only_selected_server_and_does_not_modify_config(tmp_path):

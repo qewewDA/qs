@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import threading
 import time
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -97,6 +98,10 @@ def test_status_marks_stale_without_cleanup_or_reattach(tmp_path, monkeypatch, f
     assert status["connected"] is False
     assert status["summary"] is None
     assert status["last_error"]["phase"] == phase
+    persisted = json.loads((session.state_root / "connection-progress.json").read_text(encoding="utf-8"))
+    assert persisted["state"] == "stale"
+    assert persisted["summary"] is None
+    assert persisted["last_error"] == status["last_error"]
     assert session._runtime is runtime
     assert runtime.close_calls == 0
     assert len(calls) == 1

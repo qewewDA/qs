@@ -595,6 +595,11 @@ def build_direct_server(config_path: Path, *, native_bridge: NativeResearchBridg
     ) + (
             " MCP is ready independently of the game. First call attached_status once, then connect_game once "
             "if disconnected. A successful connection already contains a compact verified initial observation. "
+            "When the client wraps tools in run_code, use the MCP names declared in its SDK via tools; "
+            "an outer run_code-only tool list does not mean MCP is missing. Combine the status check and "
+            "first connect in one program when supported. Read structured code/reason/diagnostics/next_step "
+            "on failure; do not reflect on tools, guess cleanup methods or edit journal databases. "
+            "An unsupported executable requires a verified native adapter, not merely rebuilt knowledge. "
             "Report blocked/failed phases and stop; never loop retries, inspect client source, write stdio probes, "
             "or restart servers as part of ordinary onboarding."
         if existing_game else ""
