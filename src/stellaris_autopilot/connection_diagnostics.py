@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 
 from .campaign import CampaignError
-from .native import PINNED_EXE_SHA256
+from .native_builds import LEGACY_SHA256, build_for_hash, supported_versions
 
 
 PINNED_GAME_VERSION = "Cygnus v4.5.2"
@@ -29,6 +29,7 @@ class ConnectionPreflightError(CampaignError):
         self.code, self.diagnostics, self.next_step = code, diagnostics, next_step
         self.phase = ("verify_running_process" if code in {"unsupported_game_build", "executable_unreadable"}
                       else "acquire_controller" if code == "controller_lock_present"
+                      else "bind_game_window" if code in {"game_not_paused", "pause_unverified"}
                       else "check_unresolved_operations")
 
 
@@ -47,7 +48,8 @@ def executable_evidence(executable: Path) -> dict:
         "sha256": None,
         "installed_version_hint": None,
         "supported_game_version": PINNED_GAME_VERSION,
-        "supported_sha256": PINNED_EXE_SHA256,
+        "supported_sha256": LEGACY_SHA256,
+        "supported_game_versions": supported_versions(),
         "requires_native_adapter": None,
         "knowledge_rebuild_enables_native_calls": False,
     }
@@ -57,8 +59,13 @@ def executable_evidence(executable: Path) -> dict:
     except OSError:
         result["read_error"] = "executable_unreadable"
     else:
-        result["supported"] = result["sha256"] == PINNED_EXE_SHA256
+        build = build_for_hash(result["sha256"])
+        result["supported"] = build is not None
         result["requires_native_adapter"] = not result["supported"]
+        if build is not None:
+            result.update(supported_game_version=build.game_version, supported_sha256=build.sha256,
+                          control_scope=("observation_pause_checkpoint_only" if build.observation_only
+                                         else "locally_authorized_actions"))
     try:
         path = Path(executable).parent / "launcher-settings.json"
         with path.open("rb") as stream:

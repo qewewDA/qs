@@ -16,6 +16,7 @@ pytest.importorskip("mcp")
 
 import stellaris_autopilot.attached_runtime as module
 from stellaris_autopilot import connection_diagnostics
+from stellaris_autopilot.connection_diagnostics import ConnectionPreflightError
 from stellaris_autopilot.assistant_prompts import render_prompt
 from stellaris_autopilot.attached_runtime import AttachedRuntime, connect_existing
 from stellaris_autopilot.campaign import CampaignError
@@ -59,6 +60,7 @@ class Native:
 
     def bind_existing_window(self, token):
         self.calls.append(("bind", token))
+        return {"token": token, "status": "window_bound", "runtime": {"paused": True}}
 
     def load_attached_events(self, token):
         self.event_token = token
@@ -143,6 +145,19 @@ def base_state():
         "metadata": {"player_country_ids": ["0"], "ironman": False, "multiplayer": False,
                      "campaign_id": "campaign-a", "game_version": "Cygnus v4.5.2"},
     }
+
+
+@pytest.mark.parametrize("paused", [False, None])
+def test_initialize_requires_pause_before_any_dump_or_event_load(tmp_path, paused):
+    env = make_runtime(tmp_path, with_connection=False)
+    env.native.bind_existing_window = lambda token: {"runtime": {"paused": paused}}
+    with pytest.raises(ConnectionPreflightError) as captured:
+        env.runtime.initialize()
+    assert captured.value.code == ("game_not_paused" if paused is False else "pause_unverified")
+    assert captured.value.diagnostics["game_dump_requested"] is False
+    assert env.native.calls == []
+    assert not (env.state_dir / "before-attachment.sav").exists()
+    env.runtime.close()
 
 
 def verified_state(token=TOKEN):

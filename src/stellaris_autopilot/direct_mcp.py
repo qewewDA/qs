@@ -275,6 +275,9 @@ class DirectConnection:
         selection = pause_request(paused)
         if self.native_bridge is None:
             return {"status": "blocked", "reason": "A pinned native worker for a launcher-owned game is required"}
+        if getattr(self.native_bridge, "observation_only", False) is True and paused is not True:
+            return {"status": "blocked", "reason": "This build permits observation, pause and checkpoints; "
+                    "time advancement and gameplay writes need separate live verification"}
         return self._execute("set_paused", selection=selection)
 
     def queue_building(self, planet_id: str, zone_id: str, building: str) -> dict:
@@ -302,6 +305,15 @@ class DirectConnection:
 
     def _execute(self, action_id: str, *, order: Order | None = None,
                  selection: ResearchSelection | DistrictRequest | BuildingRequest | PauseRequest | None = None) -> dict:
+        if getattr(self.native_bridge, "observation_only", False) is True:
+            supported = (
+                action_id == "probe_connection" and order is None and selection is None
+                or action_id == "set_paused" and order is None
+                and isinstance(selection, PauseRequest) and selection.paused is True
+            )
+            if not supported:
+                return {"status": "blocked", "reason": "This build permits observation, pause and checkpoints; "
+                        "gameplay actions need separate live verification"}
         if order is None and selection is None and action_id not in {"probe_connection", "hold_military_fleets"}:
             return {"status": "blocked", "reason": "Unknown fixed direct action"}
         config = _configuration(self.config_path)

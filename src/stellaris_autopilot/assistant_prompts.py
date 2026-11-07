@@ -83,6 +83,8 @@ def render_prompt(*, playstyle: str = "", campaign: bool = True, existing_game: 
             "不反射工具、不猜参数、不读状态目录或 SQLite，不调用未声明的清理工具。"
             "不写 SQL、删锁、改 hash pin 来解除阻塞。"
             "版本不支持需要验证原生适配，重建知识库不能恢复原生调用。"
+            "初始摘要 control_scope=observation_pause_checkpoint_only 时，只做观察、暂停核验和保存检查点；"
+            "建设、舰队命令和推进时间尚未开放，不能绕过或改本地授权。"
         )
         saving = (
             "我说“保存”或“中途保存”时调用 checkpoint_game，核对 checkpoint_saved，"

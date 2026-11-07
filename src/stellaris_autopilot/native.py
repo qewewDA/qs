@@ -8,7 +8,6 @@ the launcher's cleanup. Submission alone never proves gameplay success.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
 import json
 import math
 from pathlib import Path
@@ -18,13 +17,15 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 
 from .owned_process import OwnedGameProcess
 from .attached_process import AttachedGameProcess
 from .connection_cancel import check_cancelled
+from .native_builds import LEGACY_SHA256, build_for_executable
 
 
-PINNED_EXE_SHA256 = "400df27c82ddc845aa9dce79bd468d81f18f060d299cd263e3afa93aef4f7a83"
+PINNED_EXE_SHA256 = LEGACY_SHA256  # Legacy format proofs remain bound to the original build.
 FRIDA_VERSION = "17.9.4"
 _TECH = re.compile(r"tech_[A-Za-z0-9_]{1,120}\Z", re.ASCII)
 _TOKEN = re.compile(r"[0-9a-f]{32}\Z", re.ASCII)
@@ -310,8 +311,9 @@ class NativeResearchBridge:
             raise ValueError("Native research requires a live verified Windows game")
         if isinstance(process, (OwnedGameProcess, AttachedGameProcess)) and process.executable != Path(executable).resolve():
             raise ValueError("The owned native game executable identity does not match")
-        if hashlib.sha256(Path(executable).read_bytes()).hexdigest() != PINNED_EXE_SHA256:
-            raise ValueError("Unsupported executable hash; native calls are disabled")
+        build = build_for_executable(executable)
+        self.game_version, self.executable_sha256 = build.game_version, build.sha256
+        self.observation_only = build.observation_only
         self.game = process
         self.lock = threading.Lock()
         self.request_id = 0
@@ -339,7 +341,8 @@ class NativeResearchBridge:
         threading.Thread(target=pump, daemon=True).start()
         try:
             ready = self._read()
-            if ready != {"ready": True, "version": FRIDA_VERSION}:
+            if ready != {"ready": True, "version": FRIDA_VERSION, "game_version": build.game_version,
+                         "executable_sha256": build.sha256}:
                 raise ValueError("Native worker did not validate its instrumentation version")
         except BaseException:
             self.close()
@@ -356,6 +359,11 @@ class NativeResearchBridge:
     def finish_initialization(self) -> None:
         """Clear the connection budget only after the verified runtime is ready."""
         self._remaining_timeout()
+        if getattr(self, "_attached_initialization", False):
+            result = self._call("finish_attachment", uuid.uuid4().hex)
+            if result.get("status") != "attachment_initialized" or result.get("runtime", {}).get("paused") is not True:
+                raise ValueError("Attached initialization did not finish with verified pause")
+            self._attached_initialization = False
         self._deadline = None
         self._cancel_event = None
 
@@ -425,6 +433,9 @@ class NativeResearchBridge:
 
     def submit(self, selection: ResearchSelection | DistrictConstruction | BuildingConstruction | PauseRequest, token: str) -> dict:
         from .extended_native import RESOLVED_TYPES, extended_payload
+        if (getattr(self, "observation_only", False)
+                and not (isinstance(selection, PauseRequest) and selection.paused is True)):
+            raise ValueError("This native build permits observation, verified pause and checkpoints only")
         if not isinstance(token, str) or not _TOKEN.fullmatch(token):
             raise ValueError("Invalid native operation token")
         if isinstance(selection, RESOLVED_TYPES):
@@ -468,7 +479,9 @@ class NativeResearchBridge:
             raise ValueError("Window discovery is only for a verified attached game")
         if not isinstance(token, str) or not _TOKEN.fullmatch(token):
             raise ValueError("Invalid attachment token")
-        return self._call("bind_window", token)
+        result = self._call("bind_window", token)
+        self._attached_initialization = True
+        return result
 
     def load_attached_events(self, token: str) -> dict:
         if not isinstance(self.game, AttachedGameProcess):

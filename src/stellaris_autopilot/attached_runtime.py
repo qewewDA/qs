@@ -11,7 +11,7 @@ import uuid
 from .attached_process import attach_game
 from .campaign import CampaignError, _atomic, package_dump
 from .connection_cancel import check_cancelled
-from .connection_diagnostics import check_connection_preflight
+from .connection_diagnostics import ConnectionPreflightError, check_connection_preflight
 from .direct import (NATIVE_ACTIONS, ORDER_KINDS, OWNERSHIP_HEADER, DirectConfig,
                      disarm_inbox, load_direct_config, ownership_header)
 from .direct_mcp import DirectConnection, _controller_lock, validate_connection
@@ -121,13 +121,24 @@ class AttachedRuntime:
         os.write(self._lock_descriptor, json.dumps({"controller_pid": os.getpid(), "session": self.token}).encode())
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self._phase("bind_game_window")
-        self.native.bind_existing_window(uuid.uuid4().hex)
+        binding = self.native.bind_existing_window(uuid.uuid4().hex)
+        runtime_state = binding.get("runtime") if isinstance(binding, dict) else None
+        paused = runtime_state.get("paused") if isinstance(runtime_state, dict) else None
+        if paused is not True:
+            raise ConnectionPreflightError(
+                "game_not_paused" if paused is False else "pause_unverified",
+                "Pause the loaded game before connecting",
+                {"runtime": {"paused": paused if type(paused) is bool else None},
+                 "game_dump_requested": False, "gameplay_commands_sent": 0},
+                "Pause the intended loaded save. After the user confirms it is paused, call connect_game(retry=true) once.")
         self._phase("read_current_save")
         observed, receipt = self._fresh()
         meta = observed.state.get("metadata", {})
+        game_version = getattr(self.native, "game_version", "Cygnus v4.5.2")
+        observation_only = getattr(self.native, "observation_only", False) is True
         if (observed.state.get("country_id") != "0" or meta.get("player_country_ids") != ["0"]
                 or meta.get("ironman") not in (False, "no") or meta.get("multiplayer") in (True, "yes")
-                or meta.get("game_version") != "Cygnus v4.5.2" or not meta.get("campaign_id")):
+                or meta.get("game_version") != game_version or not meta.get("campaign_id")):
             raise CampaignError("Load the supported single-player non-Ironman country 0 before connecting")
         if receipt.get("runtime", {}).get("paused") is not True:
             raise CampaignError("Pause the loaded game before connecting")
@@ -140,8 +151,10 @@ class AttachedRuntime:
             user_dir=self.user_dir, state_dir=self.state_dir, country_id="0", campaign_id=meta["campaign_id"],
             verified_game_version=meta["game_version"], session_token=self.token,
             allowed_actions=("probe_connection",),
-            allowed_orders=tuple(sorted(ORDER_KINDS)) if self._extended else ("fleet_wait", "fleet_orbit"),
-            allowed_native_actions=tuple(sorted(NATIVE_ACTIONS)) if self._extended else
+            allowed_orders=() if observation_only else
+            tuple(sorted(ORDER_KINDS)) if self._extended else ("fleet_wait", "fleet_orbit"),
+            allowed_native_actions=("set_paused",) if observation_only else
+            tuple(sorted(NATIVE_ACTIONS)) if self._extended else
             ("select_research", "queue_district", "queue_building", "set_paused"),
             single_player_confirmed=True, non_ironman_confirmed=True,
             verification_timeout_seconds=120, poll_seconds=0.25,
@@ -189,13 +202,16 @@ class AttachedRuntime:
             "fleet_count": len(observed.state.get("fleets_by_id", {})),
             "allowed_orders": list(config.allowed_orders),
             "allowed_native_actions": list(config.allowed_native_actions),
+            "control_scope": "observation_pause_checkpoint_only" if observation_only else "locally_authorized_actions",
         }
         _atomic(self.state_dir / "attached.json", json.dumps({
             "session": self.token, "pid": self.process.pid, "campaign_id": config.campaign_id,
+            "process_created_filetime": getattr(self.process, "created", None),
+            "executable_sha256": getattr(self.native, "executable_sha256", None),
             "date": observed.state["date"], "game_started": False, "connection_mode": "existing_game",
             "engine_single_player_guard_verified": True}, indent=2).encode())
         self._phase("connected")
-        if self._deadline is not None or self._cancel_event is not None:
+        if hasattr(self.native, "finish_initialization"):
             self.native.finish_initialization()
         self._deadline, self._progress, self._cancel_event = None, None, None
         return self

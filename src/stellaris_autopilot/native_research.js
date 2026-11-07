@@ -24,6 +24,8 @@ let pending = null;
 let inFlight = false;
 let gameThread = null;
 let wakeTransport = null;
+let attachedWindowBound = false;
+let attachmentInitializing = false;
 
 // Only explicit checks made before allocation use this class. A native fault,
 // failed destructor or possibly transferred command remains ambiguous.
@@ -286,6 +288,9 @@ function wakeGame(token) {
 
 function consumePending(source = 'run') {
         if (gameThread === null || Process.getCurrentThreadId() !== gameThread) return;
+        // An attached controller must wait for its correlated window wake.
+        // A run onLeave must not steal, execute or discard that pending request.
+        if (attachedWindowBound && source !== 'window_message') return;
         if (pending === null || inFlight) return;
         const request = pending;
         pending = null;
@@ -295,6 +300,9 @@ function consumePending(source = 'run') {
         let orphan = null;
         let transferred = false;
         try {
+            if (attachmentInitializing && pauseState().paused !== true) {
+                throw new NativePreconditionError('Pause was lost before attached initialization could execute');
+            }
             if (request.kind === 'set_paused' && source !== 'window_message') {
                 states.set(request.token, {status: 'blocked', reason: 'Pause requires the native window wake transport',
                     consumed: true, submitted: false});
@@ -456,7 +464,16 @@ rpc.exports = {
         const state = base.add(0x3114e68).readPointer();
         if (state.isNull() || state.add(0xf90).readPointer().isNull()) throw new Error('Load a game before connecting');
         gameThread = candidates[0].thread;
+        attachedWindowBound = true;
+        attachmentInitializing = true;
         return {token, status: 'window_bound', game_thread_id: gameThread, runtime: pauseState()};
+    },
+    finishattachment(token) {
+        if (typeof token !== 'string' || !/^[0-9a-f]{32}$/.test(token) ||
+            !attachedWindowBound || !attachmentInitializing || pending !== null || inFlight ||
+            pauseState().paused !== true) throw new Error('Attached initialization is not ready');
+        attachmentInitializing = false;
+        return {token, status: 'attachment_initialized', runtime: pauseState()};
     },
     lookup(key) {
         const value = technology(key);

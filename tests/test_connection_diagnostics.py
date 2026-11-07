@@ -12,13 +12,16 @@ from stellaris_autopilot.connection_diagnostics import (
     unresolved_evidence,
 )
 from stellaris_autopilot.mcp_server import _PreviewJournal
+from stellaris_autopilot.native_builds import NativeBuild
 
 
 def _executable(tmp_path, monkeypatch, *, supported=True, version="Cygnus v4.5.3 (4e91)"):
     executable = tmp_path / "stellaris.exe"
     executable.write_bytes(b"fake exact executable")
     if supported:
-        monkeypatch.setattr(module, "PINNED_EXE_SHA256", hashlib.sha256(executable.read_bytes()).hexdigest())
+        fake = NativeBuild(hashlib.sha256(executable.read_bytes()).hexdigest(), "Cygnus v4.5.2", False)
+        original = module.build_for_hash
+        monkeypatch.setattr(module, "build_for_hash", lambda digest: fake if digest == fake.sha256 else original(digest))
     (tmp_path / "launcher-settings.json").write_text(json.dumps({"version": version}), encoding="utf-8")
     return executable
 

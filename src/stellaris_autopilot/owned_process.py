@@ -10,7 +10,6 @@ from __future__ import annotations
 import base64
 import ctypes
 from ctypes import wintypes
-import hashlib
 import json
 import math
 import ntpath
@@ -82,10 +81,11 @@ def _same_path(left: str | Path, right: str | Path) -> bool:
 
 
 def _check_executable(executable: Path):
-    # A local import avoids a cycle when native.py accepts this trusted type.
-    from .native import PINNED_EXE_SHA256
-    if hashlib.sha256(executable.read_bytes()).hexdigest() != PINNED_EXE_SHA256:
-        raise OwnedProcessError("Unsupported game executable")
+    from .native_builds import build_for_executable
+    try:
+        build_for_executable(executable)
+    except ValueError:
+        raise OwnedProcessError("Unsupported game executable") from None
 
 
 def check_steam_session() -> bool:

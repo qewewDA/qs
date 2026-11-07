@@ -6,24 +6,23 @@ from pathlib import Path
 import sys
 import frida
 
-from .native import FRIDA_VERSION, PINNED_EXE_SHA256
-import hashlib
+from .native import FRIDA_VERSION
+from .native_builds import build_for_executable, render_native_source
 
 root = Path(__file__).resolve().parent
 
 if frida.__version__ != FRIDA_VERSION:
     raise SystemExit("Unverified instrumentation version")
-if hashlib.sha256(Path(sys.argv[2]).read_bytes()).hexdigest() != PINNED_EXE_SHA256:
-    raise SystemExit("Unverified executable hash")
+build = build_for_executable(Path(sys.argv[2]))
 
 
 session = script = None
 try:
     session = frida.attach(int(sys.argv[1]))
-    sources = ("native_research.js", "native_ship.js", "native_ship_colony.js", "native_planet.js", "native_fleet.js")
-    script = session.create_script("\n".join((root / name).read_text(encoding="utf-8") for name in sources))
+    script = session.create_script(render_native_source(build, root))
     script.load()
-    print(json.dumps({"ready": True, "version": frida.__version__}), flush=True)
+    print(json.dumps({"ready": True, "version": frida.__version__, "game_version": build.game_version,
+                      "executable_sha256": build.sha256}), flush=True)
     for line in sys.stdin:
         message = json.loads(line)
         try:
@@ -38,6 +37,8 @@ try:
                 result = script.exports_sync.cancel(*message["arguments"])
             elif method == "bind_window":
                 result = script.exports_sync.bindwindow(*message["arguments"])
+            elif method == "finish_attachment":
+                result = script.exports_sync.finishattachment(*message["arguments"])
             elif method == "close":
                 print(json.dumps({"request_id": message["request_id"], "result": {"closed": True}}), flush=True)
                 break

@@ -532,6 +532,60 @@ def test_native_pause_and_fixed_inbox_rpc_have_no_free_text_or_path(bridge):
     ]
 
 
+@pytest.mark.parametrize("kind", ["request_observation", "run_inbox", "load_attached_events"])
+@pytest.mark.parametrize("lost_pause", [False, True])
+def test_attached_initializer_keeps_pending_on_run_hook_and_rechecks_pause_at_consumption(kind, lost_pause):
+    # Execute the real consumer under the existing native-memory fake. No real
+    # process, Frida, window messages or native calls are involved.
+    tail = r"""
+vm.runInContext('gameThread=77; attachedWindowBound=true; attachmentInitializing=true;', context);
+const request={kind:KIND,country_id:'0',token};
+context.rpc.exports.enqueue(request);
+callback();
+const afterRun=context.rpc.exports.result(token);
+if(LOST) state.block.bytes[0x594]=0;
+context.consumePending('window_message');
+const outcome=context.rpc.exports.result(token);
+console.log(JSON.stringify({afterRun,outcome,counters}));
+"""
+    tail = tail.replace("KIND", json.dumps(kind)).replace("LOST", json.dumps(lost_pause))
+    harness = _CONTROL_VM_HARNESS.split("let observed, outcome, nextStatus", 1)[0] + tail
+    result = vm_result("attachment_race", harness)
+    assert result["afterRun"]["status"] == "pending"
+    if lost_pause:
+        assert result["outcome"]["status"] == "blocked"
+        assert result["outcome"]["submitted"] is False
+        assert result["counters"]["assign"] == result["counters"]["run"] == result["counters"]["dump"] == 0
+    elif kind in {"request_observation", "run_inbox"}:
+        assert result["outcome"]["execution_source"] == "window_message"
+        assert result["counters"]["dump" if kind == "request_observation" else "run"] == 1
+    else:
+        # The fake has no event manager. It reaches the normal precondition
+        # rejection only after the correlated window source and paused check.
+        assert result["outcome"]["status"] == "blocked"
+
+
+def test_finished_attachment_allows_running_observation_but_still_requires_window_source():
+    tail = r"""
+vm.runInContext('gameThread=77; attachedWindowBound=true; attachmentInitializing=true;', context);
+const finish=context.rpc.exports.finishattachment(token);
+state.block.bytes[0x594]=0;
+context.rpc.exports.enqueue({kind:'request_observation',country_id:'0',token:other});
+callback();
+const afterRun=context.rpc.exports.result(other);
+context.consumePending('window_message');
+console.log(JSON.stringify({finish,afterRun,outcome:context.rpc.exports.result(other),counters}));
+"""
+    harness = _CONTROL_VM_HARNESS.split("let observed, outcome, nextStatus", 1)[0] + tail
+    result = vm_result("attachment_finished", harness)
+    assert result["finish"]["status"] == "attachment_initialized"
+    assert result["afterRun"]["status"] == "pending"
+    assert result["outcome"]["status"] == "dump_requested"
+    assert result["outcome"]["runtime"]["paused"] is False
+    assert result["outcome"]["execution_source"] == "window_message"
+    assert result["counters"]["dump"] == 1
+
+
 _PLANET_QUEUE_VM = r"""
 const fs=require('fs'),vm=require('vm'),scenario=process.argv[2];
 class Ref {
